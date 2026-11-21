@@ -1,0 +1,22 @@
+# konectl: give the logged-in user access to the ROCCAT Kone Pro Air configuration
+# channel, so konectl runs without sudo. Only the vendor interface is opened up;
+# the mouse and macro-keyboard interfaces stay root-only.
+#
+# Install:
+#   sudo install -m 0644 udev/70-konectl.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger
+#
+# The file name must sort before 73-seat-late.rules for TAG+="uaccess" to apply.
+
+SUBSYSTEM!="hidraw", GOTO="konectl_end"
+
+# Provides ID_USB_INTERFACE_NUM. ATTRS{} keys must all match on one parent device,
+# so bInterfaceNumber cannot be combined with idProduct directly.
+ATTRS{idVendor}=="1e7d", ATTRS{idProduct}=="2c8e|2c92", IMPORT{builtin}="usb_id"
+
+# Wireless dongle: vendor channel on interface 2
+ATTRS{idVendor}=="1e7d", ATTRS{idProduct}=="2c8e", ENV{ID_USB_INTERFACE_NUM}=="02", TAG+="uaccess"
+# USB cable: vendor channel on interface 1
+ATTRS{idVendor}=="1e7d", ATTRS{idProduct}=="2c92", ENV{ID_USB_INTERFACE_NUM}=="01", TAG+="uaccess"
+
+LABEL="konectl_end"
