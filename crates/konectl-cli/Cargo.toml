@@ -1,0 +1,21 @@
+[package]
+name = "konectl-cli"
+description = "Command-line tool to configure the ROCCAT Kone Pro Air mouse on Linux (unofficial)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "konectl"
+path = "src/main.rs"
+# Same name as the library crate; documenting both would overwrite the library docs.
+doc = false
+
+[dependencies]
+konectl.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true
