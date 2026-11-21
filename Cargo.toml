@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["crates/konectl", "crates/konectl-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+konectl = { path = "crates/konectl", version = "0.1.0" }
+anyhow = "1.0.104"
+clap = { version = "4.6.9", features = ["derive"] }
+hidapi = "2.6.7"
+thiserror = "2.0.21"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
