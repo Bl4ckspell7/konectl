@@ -1,5 +1,8 @@
 //! `konectl` — command-line front end of the konectl library.
 
+#[cfg(target_os = "linux")]
+mod udev;
+
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
@@ -27,6 +30,12 @@ struct Cli {
 enum Command {
     /// List connected Kone Pro Air devices.
     List,
+    /// Install or check the udev rule that lets konectl run without sudo.
+    #[cfg(target_os = "linux")]
+    Udev {
+        #[command(subcommand)]
+        action: UdevAction,
+    },
     /// Show the battery level.
     Battery,
     /// Show the wireless signal strength.
@@ -170,11 +179,39 @@ impl FromStr for DpiValue {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Debug, Subcommand)]
+enum UdevAction {
+    /// Install the rule (runs sudo; shows each command first) and apply it.
+    Install,
+    /// Remove the rule (runs sudo) and apply the change.
+    Uninstall,
+    /// Show whether the rule is installed and the mouse can be opened.
+    Status,
+    /// Print the rule, e.g. for a distribution package.
+    Rule,
+}
+
 fn main() -> Result<()> {
     let cli: Cli = Cli::parse();
+    // The udev commands work without HID access; that is what they set up.
+    #[cfg(target_os = "linux")]
+    if let Command::Udev { action } = &cli.command {
+        return match action {
+            UdevAction::Install => udev::install(),
+            UdevAction::Uninstall => udev::uninstall(),
+            UdevAction::Status => udev::status(),
+            UdevAction::Rule => {
+                print!("{}", udev::RULE);
+                Ok(())
+            }
+        };
+    }
     let manager: Manager = Manager::new().context("failed to initialise HID access")?;
 
     match cli.command {
+        #[cfg(target_os = "linux")]
+        Command::Udev { .. } => unreachable!("handled above"),
         Command::List => list(&manager)?,
         Command::Battery => match open(&manager)?.battery() {
             Ok(battery) => match battery.percent() {
@@ -368,7 +405,7 @@ fn open(manager: &Manager) -> Result<KoneProAir<HidTransport>> {
     match manager.open_first() {
         Ok(mouse) => Ok(mouse),
         Err(error @ konectl::Error::Hid(_)) => Err(anyhow::Error::new(error).context(
-            "could not open the mouse (no access to /dev/hidraw*? install udev/70-konectl.rules or use sudo)",
+            "could not open the mouse (no access to /dev/hidraw*?): run `konectl udev install`, or use sudo",
         )),
         Err(error) => Err(error.into()),
     }
