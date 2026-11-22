@@ -54,7 +54,7 @@ the mouse input itself). `cargo install` does not install it; take it from the
 repository, at the tag of the installed version:
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/Bl4ckspell7/konectl/v0.1.0/udev/70-konectl.rules
+curl -fsSLO https://raw.githubusercontent.com/Bl4ckspell7/konectl/v0.2.0/udev/70-konectl.rules
 sudo install -m 0644 70-konectl.rules /etc/udev/rules.d/
 sudo udevadm control --reload && sudo udevadm trigger
 ```
