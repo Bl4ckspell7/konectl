@@ -20,7 +20,8 @@ to the mouse directly over hidraw.
 | Live LED colours (lost on sleep)          | ✅     |
 | Button assignment, macros                 | ❌ not decoded |
 
-Tested with firmware 4.19, over the wireless dongle and the USB cable. See
+Tested with mouse firmware 4.32 (dongle firmware 4.19), over the wireless dongle
+and the USB cable. See
 [docs/protocol.md](docs/protocol.md) for the protocol and
 [docs/reverse-engineering.md](docs/reverse-engineering.md) for how it was worked out.
 
