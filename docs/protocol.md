@@ -69,7 +69,9 @@ error `0d`. Moving the mouse wakes it up.
 | `10 10 0b 00 …`             | live LED colours (not saved)                  |
 | `90 72` / `10 72 01 00 <v>` | energy saving: `aa` = on, `00` = off (one setting for all profiles) |
 | `10 08 01 00 01`, `90 08`, `10 15 01 00 01` | lift-off calibration, see below |
-| `90 09`, `90 71`, `10 0a`, `10 71` | *unknown*, see below |
+| `90 09`                     | connection state: `cc` = mouse awake, `dd` = asleep (Swarm polls it) |
+| `90 07 …` from the mouse    | button press for a function Swarm carries out, see [buttons](#blocks-24-buttons) |
+| `90 71`, `10 0a`, `10 71`   | *unknown*, see below |
 
 ### Device info: `90 00 04 00 18 25 51 32`
 
@@ -102,7 +104,10 @@ The mouse has five profile slots; Swarm uses slots 1–3.
 - `10 03 01 00 <p>` makes profile `p` the active one. Swarm sends it on *Apply*
   when another profile slot was chosen.
 - `90 11` returns the profile table: 5 entries of 5 bytes. Slots 1–3 hold
-  `01 64 00 00 00`, slots 4 and 5 are zero. The meaning of the bytes is *unknown*.
+  `01 64 00 00 00`, slots 4 and 5 are zero. Byte 0 is `01` for a slot in use,
+  byte 1 is *unknown* (`64`), bytes 2–4 are the profile colour (RGB) that the
+  DPI LED flashes when the mouse switches to the profile; `00 00 00` = none
+  (Swarm's red is `f4 00 00`).
 - `10 11 06 00 <p> <5 bytes>` writes entry `p` of the table. Swarm sends it
   before the block writes of each profile, with the bytes it read.
 
@@ -112,9 +117,9 @@ The mouse has five profile slots; Swarm uses slots 1–3.
 |-------|-----------------------|-----------------------|--------|----------------------------|
 | 0     | `90 00 04 00 18 25 51 32` (offset 10) | `10 50 14 00 …` | 20 | DPI, polling rate, lift-off, angle snapping, debounce |
 | 1     | `90 01` (offset 4)    | `10 50 0b 01 …`       | 11     | saved lighting             |
-| 2     | `90 02` (offset 4)    | `10 50 1c 02 …`       | 28     | *unknown*                  |
-| 3     | `90 04` (offset 4)    | `10 50 18 03 …`       | 24     | button assignment (layout *unknown*) |
-| 4     | `90 05` (offset 4)    | `10 50 18 04 …`       | 24     | Easy-Shift assignment (layout *unknown*) |
+| 2     | `90 02` (offset 4)    | `10 50 1c 02 …`       | 28     | button function codes      |
+| 3     | `90 04` (offset 4)    | `10 50 18 03 …`       | 24     | button entries, standard layer |
+| 4     | `90 05` (offset 4)    | `10 50 18 04 …`       | 24     | button entries, Easy-Shift layer |
 
 Writes take effect immediately and are kept: Swarm reads them back after a
 restart. There is no separate save command.
@@ -169,6 +174,70 @@ shown as 50.
 The colours are kept when switching effects. With effect `09`, `90 01` answers
 with the colours that are currently shown, not the saved ones.
 
+#### Blocks 2–4: buttons
+
+Every button has a function in two layers: the standard layer, and the
+Easy-Shift[+] layer, which applies while a button with the Easy-Shift function
+is held. Swarm numbers the buttons 1–8 (1 left, 2 right, 3 wheel click, 4 and 5
+wheel up and down, 6 and 7 the front and rear side button, 8 the profile
+button); the blocks store them in another order:
+
+| Slot   | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|--------|---|---|---|---|---|---|---|---|
+| Button | 1 | 2 | 3 | 7 | 6 | 8 | 4 | 5 |
+
+- Block 2, bytes 0–7: the function code of slots 1–8 in the standard layer;
+  bytes 8–15: the same for the Easy-Shift layer; bytes 16–27: *unknown* (`00`).
+- Blocks 3 (standard layer) and 4 (Easy-Shift layer): a three-byte entry per
+  slot. It is used with function code `40`; with any other code Swarm writes
+  `00 00 00`.
+
+| Code (block 2)    | Function                                              |
+|-------------------|-------------------------------------------------------|
+| `00`              | disabled                                              |
+| `40`              | what the entry says (next table)                      |
+| `41`              | profile cycle                                         |
+| `42`              | DPI cycle                                             |
+| `45`              | Easy-Shift[+] (also "Easy-Shift[+] All Devices")      |
+| `46`, `47`        | next profile, previous profile                        |
+| `48`–`4a`         | switch to profile 1–3 ("Profile presets")             |
+| `4e`, `4f`, `50`, `51` | Easy-Wheel (hold and turn the wheel): DPI, volume, Alt-Tab, Aero Flip 3D |
+| `52`, `53`        | DPI up, DPI down                                      |
+| `54`, `56`        | Easy-Aim presets: 200 and 900 DPI while the button is held |
+
+| Entry (blocks 3, 4) | Function                                            |
+|---------------------|-----------------------------------------------------|
+| `00 NN 00`          | mouse function: `01` click, `02` menu (right click), `03` universal scrolling (middle click), `04` browser back, `05` browser forward, `06` double click, `07` scroll up, `08` scroll down |
+| `01 MM KK`          | key: HID keyboard usage `KK` with the HID modifier mask `MM` (`01` Ctrl, `02` Shift, `04` Alt, `08` Win); `KK` = `00` for modifiers alone ("Left ctrl" is `01 01 00`) |
+| `02 LL HH`          | consumer control, little-endian HID usage: `e2` mute, `e9`/`ea` volume up/down, `b5`/`b6` next/previous track, `b7` stop, `cd` play/pause, `0221` browser search, `0226` browser stop, `0227` browser refresh |
+| `0c LL HH`          | Easy-Aim with a custom DPI, little-endian in steps of 50 (`2c 01` = 15000) |
+| `05 NN 00`          | system: `8e` sleep, `8f` wake, `74` shut down       |
+| `0b NN 00`          | carried out by Swarm: `02` open Swarm, `04` stop timer, `07` open website, `23` hibernate, `24` reboot, `25` lock, `26` log off, `29` task manager |
+
+Swarm's "Browser backwards" and "Browser forwards" are the mouse functions `04`
+and `05`; "New tab" and "New window" are the keys Ctrl+T and Ctrl+N; hotkeys
+are key entries.
+
+When a button with a `0b` entry is pressed, the mouse sends
+`90 07 04 00 <code> <entry> <slot>` on the vendor channel (`90 07 04 00 40 0b
+02 04` for "Open Swarm" on slot 4) and Swarm carries out the function. The
+website, file or program to open is stored in Swarm only. The `05` entries were
+not tested this way.
+
+What Swarm offers (konectl follows it):
+
+- Button 8 takes only the DPI and profile functions (not the presets) and has
+  no Easy-Shift function.
+- The wheel (buttons 4 and 5) takes neither macros nor the ROCCAT functions
+  (Easy-Shift, Easy-Aim, Easy-Wheel).
+- The Easy-Shift layer has no Easy-Shift function. Making a button an
+  Easy-Shift button disables its Easy-Shift function (code `00`); giving
+  button 6 another function makes its Easy-Shift function available.
+- *RESET* gives a button its default function (button 7: browser back).
+
+konectl also keeps button 1 as click in the standard layer, so the mouse stays
+usable.
+
 ### Apply sequence (Swarm)
 
 On *Apply*, Swarm rewrites everything, waiting for the `ec ac` answer after each write:
@@ -178,13 +247,19 @@ On *Apply*, Swarm rewrites everything, waiting for the `ec ac` answer after each
    and `90 72` at start-up
 3. for each profile 1–3: `10 11` (table entry), then blocks 0, 1, 2, 3 and 4 (`10 50`)
 
-Writing only the table entry and the changed block of one profile is enough.
-Replaying `10 11 06 00 01 01 64`, a block 0 write and a block 1 write from
-Linux changed the settings, and they read back correctly.
+Block writes go to the profile named in byte 0 of the last block 0 the mouse
+received, not to the profile of the table entry or the one selected for reads:
+writing only the table entry and blocks 2–4 of profile 2 changed profile 3,
+whose block 0 Swarm had written last. Block 0 therefore comes first.
 
-konectl changes settings the same way: it reads blocks 0 and 1 of the
-profile, changes only the fields it knows, writes the table entry (as read)
-and both blocks, and reads them back to check them.
+Writing the table entry, block 0 and the changed blocks of one profile is
+enough. Replaying `10 11 06 00 01 01 64`, a block 0 write and a block 1 write
+from Linux changed the settings, and they read back correctly.
+
+konectl changes settings the same way: it reads the blocks of the profile,
+changes only the fields it knows, writes the table entry, block 0 (changed, or
+as read when only other blocks change) and the other changed blocks in Swarm's
+order, and reads the written blocks back to check them.
 
 The mouse sometimes drops a request that arrives a few milliseconds after a
 state change (a profile selection or a block write): it never answers it.
@@ -230,6 +305,7 @@ Observed answers:
 | dongle, 54 %        | `90 0a 04 00 00 32 00 00 e4 0a 36 00 …`   |
 | dongle, 50 %        | `90 0a 04 00 00 32 00 00 e5 0a 32 00 …`   |
 | cable (charging), 50 % | `90 0a 04 00 01 32 01 00 32 0b 32 00 …` |
+| cable (charging), 90 % | `90 0a 04 00 01 5a 01 00 fb 0b 5a 00 …` |
 
 ### Signal: `90 70`
 
@@ -265,12 +341,13 @@ The payload has the layout of [block 1](#block-1-saved-lighting): effect `09`,
 
 ### Not understood yet
 
-- `90 09`: answer `90 09 01 00 cc`. Swarm polls it every few seconds, together with `90 70`.
 - `10 0a 01 00 <b>`: Swarm sends `01` once when it starts, and `00` after
   reading the battery.
 - `90 71` (answer `aa 03 00 aa aa`): written back unchanged by every *Apply*.
-- Blocks 2–4, the bytes of the profile table, block 0 byte 16.
+- Block 0 byte 16, block 2 bytes 16–27, byte 1 of the profile table entries
+  (`64`), function code `55` (between the two Easy-Aim presets).
 
 Swarm features that are not stored on the mouse: the DPI *Calibrate* dialog
-(an aiming game that suggests a DPI value) and the colour picker's *Gradient*
-mode (not selectable for this mouse).
+(an aiming game that suggests a DPI value), the colour picker's *Gradient*
+mode (not selectable for this mouse), timers, the targets of *Open …*, the
+button *Presets* list and the profile names.

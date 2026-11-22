@@ -11,6 +11,7 @@
 //! Everything here is pure data handling and works without hardware. See
 //! `docs/protocol.md` for what is known about each command.
 
+use crate::buttons::{Buttons, ENTRIES_LEN, FUNCTIONS_LEN, Layer};
 use crate::color::Rgb;
 use crate::settings::{
     Firmware, Info, LIGHTING_LEN, Lighting, PROFILE_COUNT, PROFILE_ENTRY_LEN, ProfileEntry,
@@ -39,7 +40,10 @@ const OP_WRITE: u8 = 0x10;
 
 const CMD_INFO: u8 = 0x00;
 const CMD_LIGHTING: u8 = 0x01;
+const CMD_BUTTON_FUNCTIONS: u8 = 0x02;
 const CMD_ACTIVATE_PROFILE: u8 = 0x03;
+const CMD_BUTTONS: u8 = 0x04;
+const CMD_EASY_SHIFT_BUTTONS: u8 = 0x05;
 const CMD_BATTERY: u8 = 0x0a;
 const CMD_LIVE_LEDS: u8 = 0x10;
 const CMD_PROFILE_TABLE: u8 = 0x11;
@@ -55,6 +59,9 @@ const ENERGY_SAVING_ON: u8 = 0xaa;
 
 const BLOCK_SENSOR: u8 = 0;
 const BLOCK_LIGHTING: u8 = 1;
+const BLOCK_BUTTON_FUNCTIONS: u8 = 2;
+const BLOCK_BUTTONS: u8 = 3;
+const BLOCK_EASY_SHIFT_BUTTONS: u8 = 4;
 
 /// Payload the official software sends with the info request; its meaning is
 /// unknown. Without it the mouse answers with an error.
@@ -192,6 +199,71 @@ pub fn write_sensor(sensor: &Sensor) -> Report {
 /// and block 0 of the same profile.
 pub fn write_lighting(lighting: &Lighting) -> Report {
     request(OP_WRITE, CMD_WRITE_BLOCK, BLOCK_LIGHTING, &lighting.bytes())
+}
+
+/// Asks for settings block 2 (button function codes) of the selected profile;
+/// answered by a report [`parse_button_functions`] accepts.
+pub fn query_button_functions() -> Report {
+    report_with_prefix(&[OP_READ, CMD_BUTTON_FUNCTIONS])
+}
+
+/// Asks for settings block 3 (standard layer) or 4 (Easy-Shift layer) of the
+/// selected profile; answered by a report [`parse_button_entries`] accepts.
+pub fn query_button_entries(layer: Layer) -> Report {
+    report_with_prefix(&[OP_READ, button_entries_command(layer)])
+}
+
+const fn button_entries_command(layer: Layer) -> u8 {
+    match layer {
+        Layer::Standard => CMD_BUTTONS,
+        Layer::EasyShift => CMD_EASY_SHIFT_BUTTONS,
+    }
+}
+
+/// Block 2, if `report` answers [`query_button_functions`].
+pub fn parse_button_functions(report: &Report) -> Option<[u8; FUNCTIONS_LEN]> {
+    // FUNCTIONS_LEN is 28, so the cast cannot truncate.
+    is_data_reply(report, CMD_BUTTON_FUNCTIONS, FUNCTIONS_LEN as u8)
+        .then(|| payload::<FUNCTIONS_LEN>(report))
+}
+
+/// Block 3 or 4, if `report` answers [`query_button_entries`] for `layer`.
+pub fn parse_button_entries(report: &Report, layer: Layer) -> Option<[u8; ENTRIES_LEN]> {
+    // ENTRIES_LEN is 24, so the cast cannot truncate.
+    is_data_reply(report, button_entries_command(layer), ENTRIES_LEN as u8)
+        .then(|| payload::<ENTRIES_LEN>(report))
+}
+
+/// Writes settings blocks 2, 3 and 4, in this order. Like blocks 0 and 1 they
+/// follow the profile's table entry.
+pub fn write_buttons(buttons: &Buttons) -> [Report; 3] {
+    [
+        request(
+            OP_WRITE,
+            CMD_WRITE_BLOCK,
+            BLOCK_BUTTON_FUNCTIONS,
+            buttons.functions(),
+        ),
+        request(
+            OP_WRITE,
+            CMD_WRITE_BLOCK,
+            BLOCK_BUTTONS,
+            buttons.entries(Layer::Standard),
+        ),
+        request(
+            OP_WRITE,
+            CMD_WRITE_BLOCK,
+            BLOCK_EASY_SHIFT_BUTTONS,
+            buttons.entries(Layer::EasyShift),
+        ),
+    ]
+}
+
+/// The first `N` payload bytes of a data answer.
+fn payload<const N: usize>(report: &Report) -> [u8; N] {
+    let mut bytes: [u8; N] = [0; N];
+    bytes.copy_from_slice(&report[PAYLOAD_OFFSET..PAYLOAD_OFFSET + N]);
+    bytes
 }
 
 /// Asks whether energy saving is on; answered by a report
@@ -483,6 +555,68 @@ pub(crate) mod tests {
                 0x10, 0x50, 0x0b, 0x01, 0x06, 0x64, 0x64, 0x46, 0x04, 0x00, 0xff, 0x00, 0x00, 0xff,
                 0x64
             ])
+        );
+    }
+
+    /// Block 2–4 answers for profile 1 at the start of capture 48.
+    pub(crate) const BUTTON_FUNCTIONS_REPLY: [u8; 20] = [
+        0x90, 0x02, 0x1c, 0x00, 0x40, 0x40, 0x40, 0x40, 0x45, 0x46, 0x40, 0x40, 0x40, 0x40, 0x40,
+        0x00, 0x00, 0x00, 0x40, 0x40,
+    ];
+    pub(crate) const BUTTONS_REPLY: [u8; 27] = [
+        0x90, 0x04, 0x18, 0x00, 0x00, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x03, 0x00, 0x01, 0x00,
+        0x34, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x08,
+    ];
+    pub(crate) const EASY_SHIFT_BUTTONS_REPLY: [u8; 27] = [
+        0x90, 0x05, 0x18, 0x00, 0x01, 0x00, 0x24, 0x01, 0x00, 0x25, 0x02, 0xe2, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xe9, 0x00, 0x02, 0xea,
+    ];
+
+    #[test]
+    fn button_blocks_match_captures() {
+        assert_eq!(query_button_functions(), report_with_prefix(&[0x90, 0x02]));
+        assert_eq!(
+            query_button_entries(Layer::Standard),
+            report_with_prefix(&[0x90, 0x04])
+        );
+        assert_eq!(
+            query_button_entries(Layer::EasyShift),
+            report_with_prefix(&[0x90, 0x05])
+        );
+        let functions =
+            parse_button_functions(&report_with_prefix(&BUTTON_FUNCTIONS_REPLY)).expect("block 2");
+        let standard = parse_button_entries(&report_with_prefix(&BUTTONS_REPLY), Layer::Standard)
+            .expect("block 3");
+        let easy_shift = parse_button_entries(
+            &report_with_prefix(&EASY_SHIFT_BUTTONS_REPLY),
+            Layer::EasyShift,
+        )
+        .expect("block 4");
+        let buttons = Buttons::from_blocks(1, functions, standard, easy_shift);
+        assert_eq!(buttons, crate::buttons::tests::start_buttons());
+        assert_eq!(
+            parse_button_entries(&report_with_prefix(&BUTTONS_REPLY), Layer::EasyShift),
+            None
+        );
+        assert_eq!(
+            parse_button_functions(&report_with_prefix(&LIGHTING_REPLY)),
+            None
+        );
+
+        // Capture 51 writes the blocks back with the same layout.
+        let mut expected_functions: Vec<u8> = vec![0x10, 0x50, 0x1c, 0x02];
+        expected_functions.extend_from_slice(&BUTTON_FUNCTIONS_REPLY[4..]);
+        let mut expected_buttons: Vec<u8> = vec![0x10, 0x50, 0x18, 0x03];
+        expected_buttons.extend_from_slice(&BUTTONS_REPLY[4..]);
+        let mut expected_easy_shift: Vec<u8> = vec![0x10, 0x50, 0x18, 0x04];
+        expected_easy_shift.extend_from_slice(&EASY_SHIFT_BUTTONS_REPLY[4..]);
+        assert_eq!(
+            write_buttons(&buttons),
+            [
+                report_with_prefix(&expected_functions),
+                report_with_prefix(&expected_buttons),
+                report_with_prefix(&expected_easy_shift)
+            ]
         );
     }
 

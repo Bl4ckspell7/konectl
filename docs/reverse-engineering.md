@@ -78,7 +78,30 @@ tools/re/vm.sh type "roccat swarm"
 ```
 
 Coordinates are pixels of the 1280×800 VM screen. Keep Swarm maximized so the
-coordinates stay the same between sessions.
+coordinates stay the same between sessions. Menus open at different heights
+for different buttons, so take a screenshot after opening one.
+
+The wireless mouse falls asleep after a few idle minutes, and Swarm then blocks
+its window until the mouse is moved. For long sessions use the cable
+(`KONECTL_RE_USB` as above) and unplug the dongle, so that `capture.sh` picks
+the cable.
+
+To use the mouse on the host in between without restarting Windows, detach it
+from the VM through QMP and attach it again later; Swarm reads it again when it
+comes back:
+
+```sh
+qmp() {
+    printf '%s\n' '{"execute":"qmp_capabilities"}' "$1" |
+        docker exec -i konectl-re-windows sh -c 'nc -U -q 1 /run/shm/qmp.sock'
+}
+qmp '{"execute":"qom-list","arguments":{"path":"/machine/peripheral-anon"}}'  # find usb-host
+qmp '{"execute":"device_del","arguments":{"id":"/machine/peripheral-anon/device[3]"}}'
+qmp '{"execute":"device_add","arguments":{"driver":"usb-host","vendorid":7805,"productid":11410,"id":"mouse"}}'
+```
+
+(`7805` and `11410` are `0x1e7d` and `0x2c92`, the cable; once attached this
+way, the device is detached with `"id":"mouse"`.)
 
 ## Capturing
 
@@ -141,6 +164,12 @@ and applied with *Apply* (Swarm rewrites all profiles on every *Apply*):
 | 42–43 | colour intensity left 50, right 30 (stored 49, 29) | block 1 bytes 1–2                |
 | 44    | lift-off "custom": calibration, then *Apply* | `10 08`, `90 08`, `10 15`, lift-off `08` |
 | 45–47 | konectl on the host, repeated changes        | requests dropped after state changes   |
+| 48    | start Swarm (third session)                  | blocks 2–4 of every profile            |
+| 49    | mouse asleep while Swarm runs                | `90 09` answers `dd` instead of `cc`   |
+| 50    | Swarm over the cable, idle                   | battery answer while charging          |
+| 51–56 | six batches of button assignments, up to 11 buttons per *Apply* | slot order, block 2 codes, block 3/4 entries |
+| 58    | profile colour red for slot 2                | profile table entry bytes 2–4          |
+| 59–60 | "Open Swarm" on button 7, then pressed twice | `0b` entries are reported with `90 07` |
 
 Closing Swarm's window only hides it in the tray, so it reads nothing when it
 is opened again; quit it from the tray icon instead.
