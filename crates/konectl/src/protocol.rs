@@ -46,6 +46,12 @@ const CMD_PROFILE_TABLE: u8 = 0x11;
 const CMD_SELECT_PROFILE: u8 = 0x13;
 const CMD_WRITE_BLOCK: u8 = 0x50;
 const CMD_SIGNAL: u8 = 0x70;
+const CMD_LIFT_OFF_CALIBRATION: u8 = 0x08;
+const CMD_LIFT_OFF_CALIBRATION_APPLY: u8 = 0x15;
+const CMD_ENERGY_SAVING: u8 = 0x72;
+
+/// Energy saving value for "on"; "off" is 0.
+const ENERGY_SAVING_ON: u8 = 0xaa;
 
 const BLOCK_SENSOR: u8 = 0;
 const BLOCK_LIGHTING: u8 = 1;
@@ -186,6 +192,50 @@ pub fn write_sensor(sensor: &Sensor) -> Report {
 /// and block 0 of the same profile.
 pub fn write_lighting(lighting: &Lighting) -> Report {
     request(OP_WRITE, CMD_WRITE_BLOCK, BLOCK_LIGHTING, &lighting.bytes())
+}
+
+/// Asks whether energy saving is on; answered by a report
+/// [`parse_energy_saving`] accepts.
+pub fn query_energy_saving() -> Report {
+    report_with_prefix(&[OP_READ, CMD_ENERGY_SAVING])
+}
+
+/// Turns energy saving on or off (one setting for all profiles).
+pub fn set_energy_saving(enabled: bool) -> Report {
+    let value: u8 = if enabled { ENERGY_SAVING_ON } else { 0 };
+    request(OP_WRITE, CMD_ENERGY_SAVING, 0, &[value])
+}
+
+/// Energy saving state, if `report` answers [`query_energy_saving`]:
+/// `Some(Ok(on))`, or `Some(Err(raw))` for a value konectl does not know.
+pub fn parse_energy_saving(report: &Report) -> Option<std::result::Result<bool, u8>> {
+    is_data_reply(report, CMD_ENERGY_SAVING, 1).then(|| match report[PAYLOAD_OFFSET] {
+        ENERGY_SAVING_ON => Ok(true),
+        0 => Ok(false),
+        raw => Err(raw),
+    })
+}
+
+/// Starts the lift-off calibration: the mouse measures the surface while it
+/// is moved. Not acknowledged by the mouse.
+pub fn start_lift_off_calibration() -> Report {
+    request(OP_WRITE, CMD_LIFT_OFF_CALIBRATION, 0, &[0x01])
+}
+
+/// Asks for the calibration state; answered by a report
+/// [`parse_lift_off_calibration`] accepts.
+pub fn query_lift_off_calibration() -> Report {
+    report_with_prefix(&[OP_READ, CMD_LIFT_OFF_CALIBRATION])
+}
+
+/// Raw calibration state, if `report` answers [`query_lift_off_calibration`].
+pub fn parse_lift_off_calibration(report: &Report) -> Option<u8> {
+    is_data_reply(report, CMD_LIFT_OFF_CALIBRATION, 1).then(|| report[PAYLOAD_OFFSET])
+}
+
+/// Ends the lift-off calibration and keeps the measured distance.
+pub fn apply_lift_off_calibration() -> Report {
+    request(OP_WRITE, CMD_LIFT_OFF_CALIBRATION_APPLY, 0, &[0x01])
 }
 
 /// Sets both LED zones to fixed colours until the mouse sleeps (volatile).
@@ -566,6 +616,41 @@ pub(crate) mod tests {
         assert_eq!(signal.raw, 40);
         assert!(signal.radio_enabled());
         assert_eq!(signal.percent(), 88);
+    }
+
+    #[test]
+    fn energy_saving_and_calibration_match_captures() {
+        // Captures 38/39: energy saving on = aa, off = 00, acknowledged.
+        assert_eq!(
+            set_energy_saving(true),
+            report_with_prefix(&[0x10, 0x72, 0x01, 0x00, 0xaa])
+        );
+        assert_eq!(
+            set_energy_saving(false),
+            report_with_prefix(&[0x10, 0x72, 0x01, 0x00, 0x00])
+        );
+        assert_eq!(query_energy_saving(), report_with_prefix(&[0x90, 0x72]));
+        let off = report_with_prefix(&[0x90, 0x72, 0x01, 0x00, 0x00]);
+        assert_eq!(parse_energy_saving(&off), Some(Ok(false)));
+        let on = report_with_prefix(&[0x90, 0x72, 0x01, 0x00, 0xaa]);
+        assert_eq!(parse_energy_saving(&on), Some(Ok(true)));
+        let odd = report_with_prefix(&[0x90, 0x72, 0x01, 0x00, 0x05]);
+        assert_eq!(parse_energy_saving(&odd), Some(Err(0x05)));
+        // Capture 44: the lift-off calibration.
+        assert_eq!(
+            start_lift_off_calibration(),
+            report_with_prefix(&[0x10, 0x08, 0x01, 0x00, 0x01])
+        );
+        assert_eq!(
+            query_lift_off_calibration(),
+            report_with_prefix(&[0x90, 0x08])
+        );
+        let state = report_with_prefix(&[0x90, 0x08, 0x01, 0x00, 0x00]);
+        assert_eq!(parse_lift_off_calibration(&state), Some(0));
+        assert_eq!(
+            apply_lift_off_calibration(),
+            report_with_prefix(&[0x10, 0x15, 0x01, 0x00, 0x01])
+        );
     }
 
     #[test]

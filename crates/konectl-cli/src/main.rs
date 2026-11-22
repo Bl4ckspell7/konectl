@@ -7,8 +7,11 @@ use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io::ErrorKind;
+use std::io::{self, IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -78,11 +81,35 @@ enum Command {
     },
     /// Set the lift-off distance.
     Liftoff {
-        /// very-low or low.
-        distance: LiftOff,
+        /// very-low, low, custom (the distance measured by the last calibration;
+        /// calibrate first) or calibrate (measure your surface, then use custom
+        /// in all profiles).
+        distance: LiftOffArg,
         #[command(flatten)]
         target: ProfileArg,
     },
+    /// Set the "AUTO" flag of a DPI stage.
+    DpiAuto {
+        /// DPI stage (1–5); it must have a DPI value.
+        #[arg(value_parser = clap::value_parser!(u8).range(1..=5))]
+        stage: u8,
+        state: Switch,
+        #[command(flatten)]
+        target: ProfileArg,
+    },
+    /// Set what the LEDs do when the mouse is not used for a while.
+    LedTimeout {
+        /// Minutes without use (1–255), or "never".
+        time: LedTimeoutArg,
+        /// Effect after the time-out: off, static, breathing, heartbeat, blinking
+        /// or aimo; defaults to the current one (or off).
+        #[arg(short, long, value_parser = parse_sleep_effect)]
+        effect: Option<Effect>,
+        #[command(flatten)]
+        target: ProfileArg,
+    },
+    /// Show energy saving, or turn it on or off (one setting for all profiles).
+    EnergySaving { state: Option<Switch> },
     /// Turn angle snapping on or off.
     AngleSnapping {
         state: Switch,
@@ -114,6 +141,15 @@ enum Command {
         /// Effect speed, 1 (slow) to 11 (fast).
         #[arg(short, long, value_parser = clap::value_parser!(u8).range(1..=11))]
         speed: Option<u8>,
+        /// Intensity of both colours in percent (0–100).
+        #[arg(long, conflicts_with_all = ["left_intensity", "right_intensity"], value_parser = clap::value_parser!(u8).range(0..=100))]
+        intensity: Option<u8>,
+        /// Intensity of the left colour in percent (0–100).
+        #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
+        left_intensity: Option<u8>,
+        /// Intensity of the right colour in percent (0–100).
+        #[arg(long, value_parser = clap::value_parser!(u8).range(0..=100))]
+        right_intensity: Option<u8>,
         #[command(flatten)]
         target: ProfileArg,
     },
@@ -159,6 +195,62 @@ enum Switch {
 impl Switch {
     fn enabled(self) -> bool {
         self == Self::On
+    }
+}
+
+/// A lift-off distance, or `calibrate`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiftOffArg {
+    Set(LiftOff),
+    Calibrate,
+}
+
+impl FromStr for LiftOffArg {
+    type Err = konectl::Error;
+
+    fn from_str(s: &str) -> konectl::Result<Self> {
+        if s == "calibrate" {
+            return Ok(Self::Calibrate);
+        }
+        s.parse().map(Self::Set)
+    }
+}
+
+/// An effect the LEDs can switch to after the time-out.
+fn parse_sleep_effect(s: &str) -> std::result::Result<Effect, String> {
+    let effect: Effect = s
+        .parse()
+        .map_err(|error: konectl::Error| error.to_string())?;
+    if konectl::LedTimeout::EFFECTS.contains(&effect) {
+        Ok(effect)
+    } else {
+        Err(format!(
+            "{effect} cannot be used after the LED time-out: use off, static, breathing, \
+             heartbeat, blinking or aimo"
+        ))
+    }
+}
+
+/// Minutes (1–255) or `never`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LedTimeoutArg {
+    Never,
+    Minutes(u8),
+}
+
+impl FromStr for LedTimeoutArg {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        if s == "never" {
+            return Ok(Self::Never);
+        }
+        match s.parse::<u8>() {
+            Ok(minutes) if minutes > 0 => Ok(Self::Minutes(minutes)),
+            _ => Err(format!(
+                "invalid time-out {s:?}: use minutes from 1 to 255, or never"
+            )),
+        }
     }
 }
 
@@ -241,6 +333,13 @@ fn main() -> Result<()> {
                 None => info.firmware.to_string(),
             };
             println!("{:<16}{firmware}", "firmware");
+            // Best effort: the settings above are complete without it.
+            let energy_saving: &str = match mouse.energy_saving() {
+                Ok(true) => "on",
+                Ok(false) => "off",
+                Err(_) => "unknown",
+            };
+            println!("{:<16}{energy_saving}", "energy saving");
         }
         Command::Profile { profile: None } => {
             let mut mouse = open(&manager)?;
@@ -277,10 +376,77 @@ fn main() -> Result<()> {
                 Ok(())
             })?;
         }
-        Command::Liftoff { distance, target } => {
+        Command::Liftoff {
+            distance: LiftOffArg::Set(distance),
+            target,
+        } => {
             change(&manager, target.profile, |settings| {
                 settings.sensor.set_lift_off(distance)
             })?;
+        }
+        Command::Liftoff {
+            distance: LiftOffArg::Calibrate,
+            target,
+        } => {
+            if target.profile.is_some() {
+                bail!("the calibration applies to all profiles; leave out -p");
+            }
+            calibrate_lift_off(&manager)?;
+        }
+        Command::DpiAuto {
+            stage,
+            state,
+            target,
+        } => {
+            change(&manager, target.profile, |settings| {
+                settings.sensor.set_dpi_auto(stage, state.enabled())
+            })?;
+        }
+        Command::LedTimeout {
+            time,
+            effect,
+            target,
+        } => {
+            if time == LedTimeoutArg::Never && effect.is_some() {
+                bail!("--effect needs a time-out in minutes, not never");
+            }
+            change(&manager, target.profile, |settings| {
+                let timeout = match time {
+                    LedTimeoutArg::Never => konectl::LedTimeout::Never,
+                    LedTimeoutArg::Minutes(minutes) => {
+                        // Keep the current effect if it is one that can be set.
+                        let current: Option<Effect> = match settings.sensor.led_timeout() {
+                            konectl::LedTimeout::After { effect, .. }
+                                if konectl::LedTimeout::EFFECTS.contains(&effect) =>
+                            {
+                                Some(effect)
+                            }
+                            _ => None,
+                        };
+                        konectl::LedTimeout::After {
+                            minutes,
+                            effect: effect.or(current).unwrap_or(Effect::Off),
+                        }
+                    }
+                };
+                settings.sensor.set_led_timeout(timeout)
+            })?;
+        }
+        Command::EnergySaving { state } => {
+            let mut mouse = open(&manager)?;
+            // Reports a sleeping or switched-off mouse clearly.
+            mouse.info()?;
+            if let Some(state) = state
+                && mouse.energy_saving()? != state.enabled()
+            {
+                mouse.set_energy_saving(state.enabled())?;
+            }
+            let enabled: bool = mouse.energy_saving()?;
+            println!(
+                "{:<16}{}",
+                "energy saving",
+                if enabled { "on" } else { "off" }
+            );
         }
         Command::AngleSnapping { state, target } => {
             change(&manager, target.profile, |settings| {
@@ -313,10 +479,19 @@ fn main() -> Result<()> {
             right,
             brightness,
             speed,
+            intensity,
+            left_intensity,
+            right_intensity,
             target,
         } => {
             change(&manager, target.profile, |settings| {
                 let lighting = &mut settings.lighting;
+                if let Some(percent) = intensity.or(left_intensity) {
+                    lighting.set_left_intensity(percent)?;
+                }
+                if let Some(percent) = intensity.or(right_intensity) {
+                    lighting.set_right_intensity(percent)?;
+                }
                 lighting.set_effect(effect)?;
                 if let Some(colour) = color.or(left) {
                     lighting.set_left(colour);
@@ -409,6 +584,49 @@ fn open(manager: &Manager) -> Result<KoneProAir<HidTransport>> {
         )),
         Err(error) => Err(error.into()),
     }
+}
+
+/// Seconds the mouse has to be moved during the lift-off calibration (the
+/// official software asks for 10).
+const CALIBRATION_SECONDS: u64 = 12;
+
+/// Runs the lift-off calibration, then uses the measured distance in every
+/// profile, as the official software does.
+fn calibrate_lift_off(manager: &Manager) -> Result<()> {
+    if !io::stdin().is_terminal() {
+        bail!("the calibration needs a terminal: it waits for Enter before it starts");
+    }
+    let mut mouse = open(manager)?;
+    save_safety_backups(&mut mouse)?;
+    println!("Put the mouse on the surface you use. After you press Enter, move it");
+    println!("continuously for {CALIBRATION_SECONDS} seconds. If the calibration is interrupted,");
+    print!("run it again, or go back with `konectl liftoff low`. ");
+    io::stdout().flush()?;
+    let read: usize = io::stdin()
+        .read_line(&mut String::new())
+        .context("could not read from the terminal")?;
+    if read == 0 {
+        bail!("no input; the calibration was not started");
+    }
+
+    mouse.start_lift_off_calibration()?;
+    for remaining in (1..=CALIBRATION_SECONDS).rev() {
+        print!("\rkeep moving the mouse … {remaining:2} s ");
+        io::stdout().flush()?;
+        thread::sleep(Duration::from_secs(1));
+    }
+    println!("\rcalibration done                ");
+    mouse.finish_lift_off_calibration()?;
+
+    for profile in mouse.profiles()? {
+        let mut sensor = mouse.settings(Some(profile))?.sensor;
+        if sensor.lift_off() != LiftOff::Custom {
+            sensor.set_lift_off(LiftOff::Custom)?;
+            mouse.write_sensor(&sensor)?;
+        }
+    }
+    println!("lift-off is now custom (calibrated) in all profiles");
+    Ok(())
 }
 
 /// Reads the settings of `profile` (default: active), applies `edit` and
@@ -511,12 +729,20 @@ fn print_settings(settings: &ProfileSettings, active_profile: u8) {
         &if sensor.angle_snapping() { "on" } else { "off" },
     );
     row("debounce", &format!("{} ms", sensor.debounce_ms()));
+    row("led time-out", &sensor.led_timeout());
     for (stage, dpi) in (1u8..).zip(sensor.dpi_stages()) {
         let value: String = dpi.map_or_else(|| "off".to_owned(), |dpi| dpi.to_string());
-        let marker: &str = if stage == sensor.active_stage() {
-            " (active)"
+        let mut notes: Vec<&str> = Vec::new();
+        if stage == sensor.active_stage() {
+            notes.push("active");
+        }
+        if sensor.dpi_auto(stage).unwrap_or(false) {
+            notes.push("auto");
+        }
+        let marker: String = if notes.is_empty() {
+            String::new()
         } else {
-            ""
+            format!(" ({})", notes.join(", "))
         };
         row(&format!("dpi stage {stage}"), &format!("{value}{marker}"));
     }
@@ -525,7 +751,13 @@ fn print_settings(settings: &ProfileSettings, active_profile: u8) {
     row("speed", &lighting.speed());
     row(
         "colours",
-        &format!("left {}, right {}", lighting.left(), lighting.right()),
+        &format!(
+            "left {} ({}%), right {} ({}%)",
+            lighting.left(),
+            lighting.left_intensity(),
+            lighting.right(),
+            lighting.right_intensity()
+        ),
     );
     if lighting.effect() == Effect::Aimo {
         println!("(with AIMO the mouse reports the colours it shows, not saved ones)");
@@ -650,6 +882,39 @@ mod tests {
         assert!(Cli::try_parse_from(["konectl", "angle-snapping", "maybe"]).is_err());
         assert!(Cli::try_parse_from(["konectl", "debounce", "10"]).is_ok());
         assert!(Cli::try_parse_from(["konectl", "debounce", "11"]).is_err());
+    }
+
+    #[test]
+    fn parses_power_and_lighting_options() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).map(|_| ());
+        assert!(parse(&["konectl", "liftoff", "custom"]).is_ok());
+        assert!(parse(&["konectl", "liftoff", "calibrate"]).is_ok());
+        assert!(parse(&["konectl", "liftoff", "high"]).is_err());
+        assert!(parse(&["konectl", "dpi-auto", "2", "on"]).is_ok());
+        assert!(parse(&["konectl", "led-timeout", "5", "-e", "breathing"]).is_ok());
+        assert!(parse(&["konectl", "led-timeout", "never"]).is_ok());
+        assert!(parse(&["konectl", "led-timeout", "0"]).is_err());
+        assert!(parse(&["konectl", "led-timeout", "5", "-e", "wave"]).is_err());
+        assert!(parse(&["konectl", "energy-saving"]).is_ok());
+        assert!(parse(&["konectl", "energy-saving", "on"]).is_ok());
+        assert!(parse(&["konectl", "lighting", "static", "--intensity", "50"]).is_ok());
+        assert!(
+            parse(&[
+                "konectl",
+                "lighting",
+                "static",
+                "--intensity",
+                "50",
+                "--left-intensity",
+                "20"
+            ])
+            .is_err()
+        );
+        assert_eq!("never".parse::<LedTimeoutArg>(), Ok(LedTimeoutArg::Never));
+        assert_eq!(
+            "15".parse::<LedTimeoutArg>(),
+            Ok(LedTimeoutArg::Minutes(15))
+        );
     }
 
     #[test]

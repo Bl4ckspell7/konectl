@@ -133,6 +133,14 @@ and applied with *Apply* (Swarm rewrites all profiles on every *Apply*):
 | 22    | switch to profile slot 2                     | active-profile command                 |
 | 23    | quit Swarm from the tray and start it again  | read-back of the written values        |
 | 24–29 | effects off, heartbeat, breathing, blinking, battery, AIMO | effect ids               |
+| 30    | start Swarm (second session)                 | same reads as 00                       |
+| 31    | LED time-out 15 → 5 minutes                  | block 0 byte 17                        |
+| 32–37 | sleep effect none, AIMO, heartbeat, fully lit, blinking, breathing | block 0 byte 18 (`ff` = never) |
+| 38–39 | energy saving on, off                        | `10 72` with `aa` / `00`               |
+| 40–41 | DPI "AUTO" on stage 2, off again             | block 0 byte 15 (bit per stage)        |
+| 42–43 | colour intensity left 50, right 30 (stored 49, 29) | block 1 bytes 1–2                |
+| 44    | lift-off "custom": calibration, then *Apply* | `10 08`, `90 08`, `10 15`, lift-off `08` |
+| 45–47 | konectl on the host, repeated changes        | requests dropped after state changes   |
 
 Closing Swarm's window only hides it in the tray, so it reads nothing when it
 is opened again; quit it from the tray icon instead.

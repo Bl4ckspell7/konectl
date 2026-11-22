@@ -67,7 +67,9 @@ error `0d`. Moving the mouse wakes it up.
 | `90 0a`                     | battery                                       |
 | `90 70`                     | signal                                        |
 | `10 10 0b 00 …`             | live LED colours (not saved)                  |
-| `90 09`, `90 71`, `90 72`, `10 0a`, `10 71`, `10 72` | *unknown*, see below |
+| `90 72` / `10 72 01 00 <v>` | energy saving: `aa` = on, `00` = off (one setting for all profiles) |
+| `10 08 01 00 01`, `90 08`, `10 15 01 00 01` | lift-off calibration, see below |
+| `90 09`, `90 71`, `10 0a`, `10 71` | *unknown*, see below |
 
 ### Device info: `90 00 04 00 18 25 51 32`
 
@@ -128,11 +130,11 @@ Offsets are into the block (write: report offset 4 + n; read: offset 10 + n).
 | 2     | angle snapping: `00` = off, `01` = on                          |
 | 3     | active DPI stage, 0-based                                      |
 | 4–13  | DPI stages 1–5, little-endian `u16` each, in steps of 50 DPI (`0x0012` = 900). `0` = stage disabled |
-| 14    | lift-off distance: `06` = very low, `07` = low                 |
-| 15    | *unknown* (`00`)                                               |
+| 14    | lift-off distance: `06` = very low, `07` = low, `08` = custom (calibrated) |
+| 15    | DPI "AUTO" flags: bit 0 = stage 1 … bit 4 = stage 5 (Swarm offers it only for enabled stages) |
 | 16    | *unknown* (`06` in slot 1, `00` in slots 2–3); reads have shown bit 7 set (`86`), Swarm writes it cleared |
-| 17    | *unknown* (`0f`)                                               |
-| 18    | *unknown* (`00`)                                               |
+| 17    | LED time-out in minutes (`0f` = 15; Swarm's list starts at 1) |
+| 18    | effect after the LED time-out, codes as in [block 1](#block-1-saved-lighting): `00` off, `01` static, `02` breathing, `05` heartbeat, `08` blinking, `09` AIMO; `ff` (with byte 17 = `00`) = never time out |
 | 19    | debounce time in ms (write only; the read returns it at offset 41) |
 
 All of block 0 is stored per profile. Swarm shows only one debounce time
@@ -147,7 +149,7 @@ shown as 50.
 | Byte | Meaning                                                    |
 |------|------------------------------------------------------------|
 | 0    | effect (table below)                                       |
-| 1–2  | *unknown* (`64 64`)                                        |
+| 1–2  | intensity of the left and right colour, 0–100 ("I" in Swarm's colour picker) |
 | 3    | brightness, 0–100 (`0x64`)                                 |
 | 4    | speed, 1–11 (`0x01`–`0x0b`)                                |
 | 5–7  | left zone R, G, B                                          |
@@ -184,10 +186,31 @@ konectl changes settings the same way: it reads blocks 0 and 1 of the
 profile, changes only the fields it knows, writes the table entry (as read)
 and both blocks, and reads them back to check them.
 
+The mouse sometimes drops a request that arrives a few milliseconds after a
+state change (a profile selection or a block write): it never answers it.
+konectl therefore pauses 40 ms after every write (Swarm leaves 60–90 ms between
+commands) and sends an unanswered request again, up to two more times. That is
+safe because every request reads, or sets an absolute value.
+
+### Lift-off calibration
+
+Swarm's "custom" lift-off distance is measured on the user's surface:
+
+1. `10 08 01 00 01` starts the measurement. The mouse does not answer it; Swarm
+   reads `90 08` one second later (answer `90 08 01 00 00`).
+2. The user moves the mouse continuously; Swarm counts 10 seconds itself and
+   polls nothing else.
+3. `10 15 01 00 01` (answered `ec ac`) keeps the measured distance.
+4. Swarm then writes block 0 of every profile with lift-off `08` (custom).
+
+Cancelling the dialog before the start sends nothing, but Swarm then writes
+lift-off "low" (`07`) into every profile.
+
 Swarm quirks seen in the captures:
 
 - Each *Apply* stores the brightness one lower than it read (70 → 69); it
-  converts it through the slider position.
+  converts it through the slider position. Colour intensities typed into the
+  picker are stored one lower too (50 → 49).
 - Enabling a stage without changing its value (still shown as 50) sends nothing.
 
 ### Battery: `90 0a`
@@ -245,6 +268,9 @@ The payload has the layout of [block 1](#block-1-saved-lighting): effect `09`,
 - `90 09`: answer `90 09 01 00 cc`. Swarm polls it every few seconds, together with `90 70`.
 - `10 0a 01 00 <b>`: Swarm sends `01` once when it starts, and `00` after
   reading the battery.
-- `90 71` (answer `aa 03 00 aa aa`) and `90 72` (answer `01`): written back
-  unchanged by every *Apply*.
-- Blocks 2–4, the bytes of the profile table, block 0 bytes 15–18.
+- `90 71` (answer `aa 03 00 aa aa`): written back unchanged by every *Apply*.
+- Blocks 2–4, the bytes of the profile table, block 0 byte 16.
+
+Swarm features that are not stored on the mouse: the DPI *Calibrate* dialog
+(an aiming game that suggests a DPI value) and the colour picker's *Gradient*
+mode (not selectable for this mouse).

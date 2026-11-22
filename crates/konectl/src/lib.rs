@@ -31,6 +31,6 @@ pub use device::{ConnectionMode, DeviceInfo, KoneProAir, Manager};
 pub use error::{Error, Result};
 pub use protocol::{Battery, Report, Signal};
 pub use settings::{
-    Effect, Firmware, Info, LiftOff, Lighting, PollingRate, ProfileSettings, Sensor,
+    Effect, Firmware, Info, LedTimeout, LiftOff, Lighting, PollingRate, ProfileSettings, Sensor,
 };
 pub use transport::{HidTransport, Transport};
