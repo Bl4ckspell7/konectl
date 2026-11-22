@@ -24,8 +24,6 @@ body = """
 """
 trim = true
 footer = ""
-# The body above ends each release with a blank line; keep one newline at the end.
-postprocessors = [{ pattern = "\n+$", replace = "\n" }]
 
 [git]
 # Breaking changes (`type!:`) count even for types skipped below (build, chore, ci, …).
