@@ -1,0 +1,205 @@
+name: Release
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump (auto = derive from Conventional Commits)"
+        type: choice
+        default: auto
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+      dry_run:
+        description: "Dry run: compute version + notes and check packaging only (no commit/tag/release/publish)"
+        type: boolean
+        default: true
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Bump version and tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the release commit and tag
+    container: docker.io/library/archlinux:base-20261108.0.623074@sha256:d4594bb2300cba11f41c2f27923eb56f63d9988909c402f9c95517d1e362c899
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      notes: ${{ steps.notes.outputs.notes }}
+
+    steps:
+      - name: Check branch
+        if: ${{ github.ref != 'refs/heads/main' }}
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          echo "Releases are only made from main, not from ${REF}." >&2
+          exit 1
+
+      - name: Install dependencies
+        run: |
+          pacman-key --init
+          pacman -Syu --noconfirm git pkgconf rust systemd-libs uv
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install git-cliff
+        env:
+          UV_TOOL_BIN_DIR: /usr/local/bin
+        run: |
+          uv tool install 'git-cliff==2.14.2'
+          git-cliff --version
+
+      - name: Compute version
+        id: ver
+        env:
+          BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+          version="$(bash scripts/release/bump.sh compute "$BUMP")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Computed version: v$version"
+
+      - name: Preview release (dry run)
+        if: ${{ inputs.dry_run }}
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          notes="$(git cliff --tag "v${VERSION}" --unreleased --strip all)"
+          {
+            echo "## Dry run — would release \`v${VERSION}\`"
+            echo
+            echo '```markdown'
+            echo "$notes"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check packaging (dry run)
+        if: ${{ inputs.dry_run }}
+        run: cargo publish --workspace --locked --dry-run
+
+      - name: Apply version bump
+        if: ${{ ! inputs.dry_run }}
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          RELEASE_NOTES: ${{ runner.temp }}/release-notes.md
+        run: bash scripts/release/bump.sh apply "$VERSION"
+
+      - name: Run tests
+        if: ${{ ! inputs.dry_run }}
+        run: cargo test --workspace --locked
+
+      - name: Check packaging
+        if: ${{ ! inputs.dry_run }}
+        run: cargo publish --workspace --locked --dry-run --allow-dirty
+
+      - name: Commit, tag and push
+        if: ${{ ! inputs.dry_run }}
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git add Cargo.toml Cargo.lock README.md CHANGELOG.md
+          git commit -m "chore(release): v${VERSION}"
+          git tag "v${VERSION}"
+          # Branch and tag in one atomic push: either both land or neither.
+          git push --atomic origin "HEAD:refs/heads/${GITHUB_REF_NAME}" "refs/tags/v${VERSION}"
+
+      - name: Export release notes
+        id: notes
+        if: ${{ ! inputs.dry_run }}
+        env:
+          RELEASE_NOTES: ${{ runner.temp }}/release-notes.md
+        run: |
+          set -euo pipefail
+          delimiter="notes-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+          {
+            echo "notes<<${delimiter}"
+            cat "$RELEASE_NOTES"
+            echo "${delimiter}"
+          } >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish to crates.io
+    needs: release
+    if: ${{ ! inputs.dry_run }}
+    runs-on: ubuntu-latest
+    # crates.io Trusted Publishing is bound to this workflow and environment.
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write # OIDC token for crates.io Trusted Publishing
+    container: docker.io/library/archlinux:base-20261108.0.623074@sha256:d4594bb2300cba11f41c2f27923eb56f63d9988909c402f9c95517d1e362c899
+
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman-key --init
+          pacman -Syu --noconfirm git pkgconf rust systemd-libs
+
+      - name: Checkout release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: v${{ needs.release.outputs.version }}
+          persist-credentials: false
+
+      - name: Get a crates.io token
+        id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+
+      - name: Publish both crates
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          # Library first, the CLI depends on it. Versions already on crates.io
+          # are skipped, so a failed run can simply be re-run.
+          for crate in konectl konectl-cli; do
+            if curl -fsS "https://index.crates.io/ko/ne/${crate}" | grep -q "\"vers\":\"${VERSION}\""; then
+              echo "${crate} ${VERSION} is already on crates.io"
+            else
+              cargo publish -p "$crate" --locked
+            fi
+          done
+
+  github-release:
+    name: Draft GitHub release
+    needs: [release, publish]
+    if: ${{ ! inputs.dry_run }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the draft release
+
+    steps:
+      - name: Create draft release
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
+          NOTES: ${{ needs.release.outputs.notes }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${VERSION}" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+            --title "v${VERSION}" --notes "$NOTES"
