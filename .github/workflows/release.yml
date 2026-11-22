@@ -78,38 +78,33 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Computed version: v$version"
 
-      - name: Preview release (dry run)
-        if: ${{ inputs.dry_run }}
-        env:
-          VERSION: ${{ steps.ver.outputs.version }}
-        run: |
-          set -euo pipefail
-          notes="$(git cliff --tag "v${VERSION}" --unreleased --strip all)"
-          {
-            echo "## Dry run — would release \`v${VERSION}\`"
-            echo
-            echo '```markdown'
-            echo "$notes"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Check packaging (dry run)
-        if: ${{ inputs.dry_run }}
-        run: cargo publish --workspace --locked --dry-run
-
+      # The bump and the checks run in dry runs too (nothing is committed then):
+      # packaging must be checked with the new version, because the current one
+      # may already be on crates.io without the API the CLI now uses.
       - name: Apply version bump
-        if: ${{ ! inputs.dry_run }}
         env:
           VERSION: ${{ steps.ver.outputs.version }}
           RELEASE_NOTES: ${{ runner.temp }}/release-notes.md
         run: bash scripts/release/bump.sh apply "$VERSION"
 
+      - name: Preview release (dry run)
+        if: ${{ inputs.dry_run }}
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          RELEASE_NOTES: ${{ runner.temp }}/release-notes.md
+        run: |
+          {
+            echo "## Dry run — would release \`v${VERSION}\`"
+            echo
+            echo '```markdown'
+            cat "$RELEASE_NOTES"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run tests
-        if: ${{ ! inputs.dry_run }}
         run: cargo test --workspace --locked
 
       - name: Check packaging
-        if: ${{ ! inputs.dry_run }}
         run: cargo publish --workspace --locked --dry-run --allow-dirty
 
       - name: Commit, tag and push
@@ -122,7 +117,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git add Cargo.toml Cargo.lock README.md CHANGELOG.md
+          git add Cargo.toml Cargo.lock CHANGELOG.md
           git commit -m "chore(release): v${VERSION}"
           git tag "v${VERSION}"
           # Branch and tag in one atomic push: either both land or neither.

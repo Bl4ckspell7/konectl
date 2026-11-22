@@ -46,8 +46,8 @@ changelog are derived from them.
 2. **Review the dry-run job summary.** It shows the computed version and the release
    notes, and the job checks that both crates package.
 3. **Run it again with `dry_run` unchecked** (from `main`; other branches are refused).
-   The `release` job bumps the version (`Cargo.toml`, `Cargo.lock`, the udev rule link in
-   the README), updates `CHANGELOG.md`, runs the tests, then commits
+   The `release` job bumps the version (`Cargo.toml`, `Cargo.lock`), updates
+   `CHANGELOG.md`, runs the tests, then commits
    `chore(release): vX.Y.Z` and pushes it together with the tag.
 4. The `publish` job publishes `konectl`, then `konectl-cli`, to crates.io with Trusted
    Publishing through

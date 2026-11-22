@@ -49,18 +49,19 @@ To use the library in your own project: `cargo add konectl`
 
 ## Permissions
 
-By default, only root can open the mouse's `/dev/hidraw*` nodes. The udev rule
-gives the logged-in user access to the configuration interface only (not to
-the mouse input itself). `cargo install` does not install it; take it from the
-repository, at the tag of the installed version:
+By default, only root can open the mouse's `/dev/hidraw*` nodes. konectl ships
+a udev rule that gives the logged-in user access to the configuration interface
+only (not to the mouse input itself):
 
 ```sh
-curl -fsSLO https://raw.githubusercontent.com/Bl4ckspell7/konectl/v0.2.0/udev/70-konectl.rules
-sudo install -m 0644 70-konectl.rules /etc/udev/rules.d/
-sudo udevadm control --reload && sudo udevadm trigger
+konectl udev install     # installs and applies the rule (asks for your password via sudo)
+konectl udev status      # is the rule installed, can the mouse be opened?
+konectl udev uninstall   # removes it again
 ```
 
-In a clone of the repository, install `udev/70-konectl.rules` the same way.
+`konectl udev install` shows each command before it runs it. To install the
+rule yourself, e.g. in a distribution package, `konectl udev rule` prints it;
+it is also in the repository as `udev/70-konectl.rules`.
 
 ## Usage
 

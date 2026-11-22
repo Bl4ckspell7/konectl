@@ -2,7 +2,7 @@
 # channel, so konectl runs without sudo. Only the vendor interface is opened up;
 # the mouse and macro-keyboard interfaces stay root-only.
 #
-# Install:
+# Install with `konectl udev install`, or by hand:
 #   sudo install -m 0644 udev/70-konectl.rules /etc/udev/rules.d/
 #   sudo udevadm control --reload && sudo udevadm trigger
 #
