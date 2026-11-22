@@ -26,6 +26,18 @@ pub const BRIGHTNESS_MAX: u8 = 100;
 pub const SPEED_MIN: u8 = 1;
 /// Fastest lighting effect speed.
 pub const SPEED_MAX: u8 = 11;
+/// Longest debounce time the official software offers, in milliseconds.
+pub const DEBOUNCE_MAX_MS: u8 = 10;
+
+/// Fails unless `ms` is a debounce time the official software offers (0–10).
+pub(crate) fn check_debounce_ms(ms: u8) -> Result<()> {
+    if ms > DEBOUNCE_MAX_MS {
+        return Err(Error::InvalidValue(format!(
+            "invalid debounce time {ms} ms: use 0 to {DEBOUNCE_MAX_MS}"
+        )));
+    }
+    Ok(())
+}
 
 /// Length of settings block 0 (sensor and DPI).
 pub(crate) const SENSOR_LEN: usize = 20;
@@ -226,7 +238,8 @@ impl FromStr for LiftOff {
     }
 }
 
-/// Settings block 0: polling rate, DPI stages and lift-off of one profile.
+/// Settings block 0: polling rate, DPI stages, lift-off, angle snapping and
+/// debounce time of one profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sensor {
     bytes: [u8; SENSOR_LEN],
@@ -278,10 +291,23 @@ impl Sensor {
         self.bytes[Self::ANGLE_SNAPPING] != 0
     }
 
+    pub fn set_angle_snapping(&mut self, enabled: bool) {
+        self.bytes[Self::ANGLE_SNAPPING] = u8::from(enabled);
+    }
+
     /// Debounce time in milliseconds. Stored per profile; the official
     /// software keeps it equal in all profiles.
     pub const fn debounce_ms(&self) -> u8 {
         self.bytes[Self::DEBOUNCE]
+    }
+
+    /// Sets the debounce time, 0–10 ms. See
+    /// [`KoneProAir::set_debounce`](crate::KoneProAir::set_debounce) to set it
+    /// in all profiles, as the official software does.
+    pub fn set_debounce_ms(&mut self, ms: u8) -> Result<()> {
+        check_debounce_ms(ms)?;
+        self.bytes[Self::DEBOUNCE] = ms;
+        Ok(())
     }
 
     pub fn lift_off(&self) -> LiftOff {
@@ -647,6 +673,27 @@ mod tests {
         );
         assert!(sensor.set_active_stage(6).is_err());
         assert_eq!(sensor.bytes(), SENSOR_START);
+    }
+
+    #[test]
+    fn angle_snapping_and_debounce_match_official_writes() {
+        // Capture 12: angle snapping on → byte 2 = 01.
+        let mut sensor = sensor();
+        sensor.set_angle_snapping(true);
+        assert_eq!(sensor.bytes()[2], 0x01);
+        assert!(sensor.angle_snapping());
+        sensor.set_angle_snapping(false);
+        assert_eq!(sensor.bytes()[2], 0x00);
+        // Capture 13: debounce 2 → 3 ms → byte 19 = 03.
+        sensor.set_debounce_ms(3).expect("valid debounce");
+        assert_eq!(sensor.bytes()[19], 0x03);
+        assert_eq!(sensor.debounce_ms(), 3);
+        sensor.set_debounce_ms(0).expect("valid debounce");
+        sensor
+            .set_debounce_ms(DEBOUNCE_MAX_MS)
+            .expect("valid debounce");
+        assert!(sensor.set_debounce_ms(DEBOUNCE_MAX_MS + 1).is_err());
+        assert_eq!(sensor.debounce_ms(), DEBOUNCE_MAX_MS);
     }
 
     #[test]

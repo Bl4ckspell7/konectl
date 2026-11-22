@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use konectl::protocol::{REPORT_LEN, Report, VENDOR_ID};
+use konectl::settings::DEBOUNCE_MAX_MS;
 use konectl::{
     Backup, Effect, HidTransport, KoneProAir, LiftOff, Manager, PollingRate, ProfileSettings, Rgb,
 };
@@ -73,6 +74,18 @@ enum Command {
         #[command(flatten)]
         target: ProfileArg,
     },
+    /// Turn angle snapping on or off.
+    AngleSnapping {
+        state: Switch,
+        #[command(flatten)]
+        target: ProfileArg,
+    },
+    /// Set the debounce time in all profiles.
+    Debounce {
+        /// Debounce time in milliseconds (0–10).
+        #[arg(value_parser = clap::value_parser!(u8).range(0..=i64::from(DEBOUNCE_MAX_MS)))]
+        ms: u8,
+    },
     /// Set the lighting saved on the mouse. Unset options keep their values.
     Lighting {
         /// off, static, breathing, heartbeat, wave, blinking, aimo or battery.
@@ -125,6 +138,19 @@ struct ProfileArg {
     /// Profile slot (1–5); defaults to the active profile.
     #[arg(short, long, value_parser = clap::value_parser!(u8).range(1..=5))]
     profile: Option<u8>,
+}
+
+/// `on` or `off`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Switch {
+    On,
+    Off,
+}
+
+impl Switch {
+    fn enabled(self) -> bool {
+        self == Self::On
+    }
 }
 
 /// A DPI value or `off`.
@@ -218,6 +244,30 @@ fn main() -> Result<()> {
             change(&manager, target.profile, |settings| {
                 settings.sensor.set_lift_off(distance)
             })?;
+        }
+        Command::AngleSnapping { state, target } => {
+            change(&manager, target.profile, |settings| {
+                settings.sensor.set_angle_snapping(state.enabled());
+                Ok(())
+            })?;
+        }
+        Command::Debounce { ms } => {
+            let mut mouse = open(&manager)?;
+            // The safety backup reads every profile anyway; it also tells
+            // whether anything changes.
+            let backup: Backup = mouse.backup()?;
+            let unchanged: bool = backup
+                .profiles
+                .iter()
+                .all(|profile| profile.settings.sensor.debounce_ms() == ms);
+            if unchanged {
+                println!("unchanged");
+            } else {
+                write_safety_backups(&backup.to_text())?;
+                mouse.set_debounce(ms)?;
+            }
+            let active_profile: u8 = mouse.active_profile()?;
+            print_settings(&mouse.settings(None)?, active_profile);
         }
         Command::Lighting {
             effect,
@@ -354,17 +404,22 @@ fn change(
 /// Saves the settings before konectl changes them: `original.txt` once (the
 /// state before konectl's first change) and `previous.txt` before every change.
 fn save_safety_backups(mouse: &mut KoneProAir<HidTransport>) -> Result<()> {
+    write_safety_backups(&mouse.backup()?.to_text())
+}
+
+/// Writes a backup text as `previous.txt`, and as `original.txt` if that
+/// does not exist yet.
+fn write_safety_backups(text: &str) -> Result<()> {
     let directory: PathBuf =
         state_directory(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))?;
     fs::create_dir_all(&directory)
         .with_context(|| format!("could not create {}", directory.display()))?;
-    let text: String = mouse.backup()?.to_text();
 
     // Both files are written to a temporary file first, so an interrupted
     // write never leaves a truncated backup behind.
     let original: PathBuf = directory.join("original.txt");
     let original_temporary: PathBuf = directory.join("original.txt.tmp");
-    write_file(&original_temporary, &text)?;
+    write_file(&original_temporary, text)?;
     // The hard link only succeeds while original.txt does not exist yet.
     let linked = fs::hard_link(&original_temporary, &original);
     fs::remove_file(&original_temporary)
@@ -379,7 +434,7 @@ fn save_safety_backups(mouse: &mut KoneProAir<HidTransport>) -> Result<()> {
 
     let previous: PathBuf = directory.join("previous.txt");
     let previous_temporary: PathBuf = directory.join("previous.txt.tmp");
-    write_file(&previous_temporary, &text)?;
+    write_file(&previous_temporary, text)?;
     fs::rename(&previous_temporary, &previous)
         .with_context(|| format!("could not write {}", previous.display()))
 }
@@ -549,6 +604,15 @@ mod tests {
             PathBuf::from("/home/user/.local/state/konectl")
         );
         assert!(state_directory(None, None).is_err());
+    }
+
+    #[test]
+    fn parses_switches_and_debounce() {
+        let parsed = Cli::try_parse_from(["konectl", "angle-snapping", "on", "-p", "2"]);
+        assert!(parsed.is_ok());
+        assert!(Cli::try_parse_from(["konectl", "angle-snapping", "maybe"]).is_err());
+        assert!(Cli::try_parse_from(["konectl", "debounce", "10"]).is_ok());
+        assert!(Cli::try_parse_from(["konectl", "debounce", "11"]).is_err());
     }
 
     #[test]

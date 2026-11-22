@@ -29,17 +29,18 @@ sudo modprobe usbmon && sudo udevadm trigger --subsystem-match=usbmon
 
 [`tools/re/compose.yaml`](../tools/re/compose.yaml) runs
 [dockur/windows](https://github.com/dockur/windows) with the wireless dongle
-passed through (edit `productid` to `0x2c92` for the cable).
+passed through. `KONECTL_RE_USB` selects the USB device for the VM: empty for
+none, `-device usb-host,vendorid=0x1e7d,productid=0x2c92` for the cable.
 
 ```sh
-tools/re/fetch-iso.sh                                         # Windows 11 LTSC evaluation ISO, 4.8 GB
-KONECTL_RE_ARGUMENTS= docker compose -f tools/re/compose.yaml up -d   # install without passthrough
+tools/re/fetch-iso.sh                                          # Windows 11 LTSC evaluation ISO, 4.8 GB
+KONECTL_RE_USB= docker compose -f tools/re/compose.yaml up -d  # install without passthrough
 ```
 
 `fetch-iso.sh` downloads the ISO from Microsoft and checks its checksum. Run it
 again to resume an interrupted download. The first start of the VM installs
 Windows unattended, which takes about 20–30 minutes; watch it at
-<http://127.0.0.1:8006>. With `KONECTL_RE_ARGUMENTS` empty, the mouse stays on
+<http://127.0.0.1:8006>. With `KONECTL_RE_USB` empty, the mouse stays on
 the host while Windows installs. Once Windows is up, recreate the container to
 hand the mouse to the VM:
 
@@ -62,6 +63,23 @@ mouse's own firmware (4.32).
 **Decline firmware updates.** An interrupted update over USB passthrough can
 brick the mouse, and new firmware may change the protocol.
 
+### Driving the VM from the host
+
+While the mouse belongs to the VM, [`tools/re/vm.sh`](../tools/re/vm.sh) takes
+screenshots and sends mouse clicks and key presses through QEMU (the QMP socket
+that `compose.yaml` configures), so Swarm can be operated without a second
+mouse:
+
+```sh
+tools/re/vm.sh shot                 # → tools/re/captures/screen.png
+tools/re/vm.sh click 1148 737       # e.g. Swarm's Apply button (maximized window)
+tools/re/vm.sh key meta_l-up        # maximize the focused window
+tools/re/vm.sh type "roccat swarm"
+```
+
+Coordinates are pixels of the 1280×800 VM screen. Keep Swarm maximized so the
+coordinates stay the same between sessions.
+
 ## Capturing
 
 One capture per action, one change per capture:
@@ -70,6 +88,15 @@ One capture per action, one change per capture:
 tools/re/capture.sh dpi-stage1-850   # start, then change exactly one setting and apply it
 # Ctrl+C after a few seconds of idle
 tools/re/extract.sh tools/re/captures/01-dpi-stage1-850.pcapng
+```
+
+For scripted sessions, run the capture in the background and stop it when the
+change is applied; `--stop` prints the extract:
+
+```sh
+tools/re/capture.sh --background dpi-stage1-850
+tools/re/vm.sh click …               # change the setting, then Apply
+tools/re/capture.sh --stop
 ```
 
 `capture.sh` writes `tools/re/captures/<NN>-<name>.pcapng`, plus a `.dev` file
@@ -82,7 +109,8 @@ that records the bus, the device address and the config interface's endpoints.
 ```
 
 Comparing the extracts of two captures that differ in one setting shows which
-bytes encode it.
+bytes encode it. Some writes carry data past their declared length (e.g. the
+Easy-Shift block); `extract.sh --full` prints all 64 bytes of every report.
 
 ## Captures
 
@@ -98,7 +126,7 @@ and applied with *Apply* (Swarm rewrites all profiles on every *Apply*):
 | 08–10 | polling rate 1000 → 500 → 125 → 250 Hz       | rate values                            |
 | 11    | lift-off low → very low                      | lift-off byte                          |
 | 12    | angle snapping on                            | angle-snapping byte                    |
-| 13    | debounce 2 → 3 ms                            | debounce byte (global)                 |
+| 13    | debounce 2 → 3 ms                            | debounce byte (Swarm writes every profile) |
 | 14–16 | fully lit; left colour red; right colour `#123456` | effect byte, colour bytes (RGB order) |
 | 17    | brightness                                   | brightness byte                        |
 | 18–21 | wave; speed slider middle, minimum, maximum  | effect id, speed byte and range        |

@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::protocol::{self, Battery, Report, Signal, Status};
 use crate::settings::{
     Effect, Firmware, Info, Lighting, PROFILE_COUNT, ProfileEntry, ProfileSettings, Sensor,
-    profile_in_use, profile_index,
+    check_debounce_ms, profile_in_use, profile_index,
 };
 use crate::transport::{HidTransport, Transport};
 
@@ -283,12 +283,28 @@ impl<T: Transport> KoneProAir<T> {
         self.write_blocks(&entry, &settings.sensor, Some(&settings.lighting))
     }
 
-    /// Writes only block 0 (polling rate, DPI, lift-off) of the profile it
+    /// Writes only block 0 ([`Sensor`]: polling rate, DPI, lift-off, angle
+    /// snapping, debounce) of the profile it
     /// belongs to, after the profile's table entry, and checks that it reads
     /// back unchanged. The saved lighting is left alone.
     pub fn write_sensor(&mut self, sensor: &Sensor) -> Result<()> {
         let entry: ProfileEntry = self.profile_entry(sensor.profile())?;
         self.write_blocks(&entry, sensor, None)
+    }
+
+    /// Sets the debounce time (0–10 ms) in every profile in use, as the
+    /// official software does: it shows a single value. Profiles that already
+    /// have it are not written.
+    pub fn set_debounce(&mut self, ms: u8) -> Result<()> {
+        check_debounce_ms(ms)?;
+        for profile in self.profiles()? {
+            let mut sensor: Sensor = self.settings(Some(profile))?.sensor;
+            if sensor.debounce_ms() != ms {
+                sensor.set_debounce_ms(ms)?;
+                self.write_sensor(&sensor)?;
+            }
+        }
+        Ok(())
     }
 
     /// Reads the settings of all profiles in use.
@@ -782,6 +798,122 @@ mod tests {
             check_backup(&CABLE_INFO_REPLY, firmware(4, 31), None),
             Err(Error::InvalidBackup(_))
         ));
+    }
+
+    /// Profile table with only slot 1 in use.
+    fn single_profile_table() -> Report {
+        report_with_prefix(&[0x90, 0x11, 0x19, 0x00, 0x01, 0x64])
+    }
+
+    /// Replies for reading profile 1 (active) with `sensor`.
+    fn read_batches(sensor: &Sensor) -> Vec<Vec<Report>> {
+        let lighting = start_settings().lighting;
+        vec![
+            vec![info_reply(sensor)],
+            vec![info_reply(sensor)],
+            vec![lighting_reply(&lighting)],
+        ]
+    }
+
+    #[test]
+    fn set_debounce_writes_profiles_that_differ() {
+        let start = start_settings().sensor;
+        let mut changed = start;
+        changed.set_debounce_ms(3).expect("valid debounce");
+        let changed = Sensor::from_bytes(changed.write_bytes());
+
+        let mut batches = vec![vec![single_profile_table()]];
+        batches.extend(read_batches(&start));
+        batches.extend([
+            vec![single_profile_table()],
+            vec![accepted(0x11)],
+            vec![accepted(0x50)],
+        ]);
+        batches.extend(read_batches(&changed));
+        let mut mouse = connect(batches);
+        mouse.set_debounce(3).expect("set debounce");
+
+        let written: &[Report] = &mouse.transport.written[1..];
+        assert_eq!(written.len(), 10);
+        assert_eq!(written[6], protocol::write_sensor(&changed));
+        assert_eq!(written[6][4 + 19], 3);
+    }
+
+    #[test]
+    fn set_debounce_writes_a_non_active_profile() {
+        // Slots 1 and 2 in use; profile 1 (active) already has 3 ms, profile 2 has 2 ms.
+        let table = report_with_prefix(&[
+            0x90, 0x11, 0x19, 0x00, 0x01, 0x64, 0x00, 0x00, 0x00, 0x01, 0x64,
+        ]);
+        let mut profile_1 = start_settings().sensor;
+        profile_1.set_debounce_ms(3).expect("valid debounce");
+        let mut bytes = start_settings().sensor.bytes();
+        bytes[0] = 2;
+        let profile_2 = Sensor::from_bytes(bytes);
+        let mut written_2 = profile_2;
+        written_2.set_debounce_ms(3).expect("valid debounce");
+        let written_2 = Sensor::from_bytes(written_2.write_bytes());
+        let lighting = lighting_reply(&start_settings().lighting);
+
+        let mut batches = vec![vec![table]];
+        // Profile 1: active, read directly; already 3 ms.
+        batches.extend(read_batches(&profile_1));
+        // Profile 2: selected for reading, then the active profile again.
+        batches.extend([
+            vec![info_reply(&profile_1)],
+            vec![table],
+            vec![accepted(0x13)],
+            vec![info_reply(&profile_2)],
+            vec![lighting],
+            vec![accepted(0x13)],
+        ]);
+        // Write profile 2, then read it back the same way.
+        batches.extend([vec![table], vec![accepted(0x11)], vec![accepted(0x50)]]);
+        batches.extend([
+            vec![info_reply(&profile_1)],
+            vec![table],
+            vec![accepted(0x13)],
+            vec![info_reply(&written_2)],
+            vec![lighting],
+            vec![accepted(0x13)],
+        ]);
+        let mut mouse = connect(batches);
+        mouse.set_debounce(3).expect("set debounce");
+
+        let written: &[Report] = &mouse.transport.written[1..];
+        assert_eq!(written.len(), 19);
+        assert_eq!(written[6], protocol::select_profile(2));
+        assert_eq!(written[9], protocol::select_profile(1));
+        assert_eq!(written[11][..5], [0x10, 0x11, 0x06, 0x00, 0x02]);
+        assert_eq!(written[12], protocol::write_sensor(&written_2));
+        // Only profile 2 was written.
+        let sensor_writes: usize = written
+            .iter()
+            .filter(|report| report[..4] == [0x10, 0x50, 0x14, 0x00])
+            .count();
+        assert_eq!(sensor_writes, 1);
+    }
+
+    #[test]
+    fn set_debounce_skips_profiles_that_match() {
+        let start = start_settings().sensor;
+        let mut batches = vec![vec![single_profile_table()]];
+        batches.extend(read_batches(&start));
+        let mut mouse = connect(batches);
+        mouse
+            .set_debounce(start.debounce_ms())
+            .expect("set debounce");
+        assert_eq!(mouse.transport.written.len(), 1 + 4);
+    }
+
+    #[test]
+    fn set_debounce_rejects_invalid_values_before_writing() {
+        let mut mouse = connect(vec![]);
+        assert!(matches!(
+            mouse.set_debounce(11),
+            Err(Error::InvalidValue(_))
+        ));
+        assert_eq!(mouse.transport.written.len(), 1);
     }
 
     #[test]
