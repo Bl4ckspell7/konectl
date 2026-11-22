@@ -3,7 +3,10 @@
 #
 #   <seconds>  OUT|IN  <hex bytes, trailing zeros trimmed>
 #
-# Usage: tools/re/extract.sh <capture.pcapng>
+# Usage: tools/re/extract.sh [--full] <capture.pcapng>
+#
+# --full prints all 64 bytes of every report, without trimming (some blocks
+# carry data past their declared length).
 #
 # Uses the .dev file written by capture.sh to select the mouse and its config
 # interface. Interrupt transfers on the config endpoints and HID class control
@@ -15,7 +18,12 @@ die() {
     exit 1
 }
 
-[[ $# -eq 1 ]] || die "usage: $0 <capture.pcapng>"
+full=0
+if [[ "${1:-}" == --full ]]; then
+    full=1
+    shift
+fi
+[[ $# -eq 1 ]] || die "usage: $0 [--full] <capture.pcapng>"
 capture="$1"
 device_file="${capture%.pcapng}.dev"
 [[ -f "$capture" ]] || die "no such capture: $capture"
@@ -47,17 +55,19 @@ tshark -r "$capture" -Y "$filter" -T fields -E separator=';' \
     -e usb.capdata \
     -e usb.data_fragment \
     -e usbhid.data |
-    awk -F';' -v interface="$interface" '
+    awk -F';' -v interface="$interface" -v full="$full" '
         {
             data = $4 != "" ? $4 : ($5 != "" ? $5 : $6)
             if (data == "") next
             # Control requests must target the config interface (wIndex); completions carry none.
             if ($3 != "" && $3 + 0 != interface + 0) next
             gsub(/[: ]/, "", data)
-            full = data
-            sub(/(00)+$/, "", data)
-            # Keep at least the two command bytes, e.g. "90 00".
-            if (length(data) < 4) data = substr(full, 1, 4)
+            if (!full) {
+                untrimmed = data
+                sub(/(00)+$/, "", data)
+                # Keep at least the two command bytes, e.g. "90 00".
+                if (length(data) < 4) data = substr(untrimmed, 1, 4)
+            }
             hex = ""
             for (i = 1; i <= length(data); i += 2) hex = hex (i > 1 ? " " : "") substr(data, i, 2)
             printf "%10.6f  %-3s  %s\n", $1, ($2 == "1" ? "IN" : "OUT"), hex
