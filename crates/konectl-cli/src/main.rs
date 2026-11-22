@@ -15,10 +15,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use konectl::buttons::{BUTTON_COUNT, HostFunction, Special};
 use konectl::protocol::{REPORT_LEN, Report, VENDOR_ID};
 use konectl::settings::DEBOUNCE_MAX_MS;
 use konectl::{
-    Backup, Effect, HidTransport, KoneProAir, LiftOff, Manager, PollingRate, ProfileSettings, Rgb,
+    Backup, ButtonAction, Buttons, Effect, HidTransport, KoneProAir, Layer, LiftOff, Manager,
+    PollingRate, ProfileSettings, Rgb,
 };
 
 /// Configure a ROCCAT Kone Pro Air mouse (unofficial).
@@ -153,6 +155,26 @@ enum Command {
         #[command(flatten)]
         target: ProfileArg,
     },
+    /// Show the button assignments (standard and Easy-Shift layer).
+    Buttons {
+        #[command(flatten)]
+        target: ProfileArg,
+    },
+    /// Assign a function to a button.
+    #[command(after_long_help = BUTTON_FUNCTIONS_HELP)]
+    Button {
+        /// Button (1–8): 1 left, 2 right, 3 wheel click, 4 wheel up, 5 wheel
+        /// down, 6 front side button, 7 rear side button, 8 profile button.
+        #[arg(value_parser = clap::value_parser!(u8).range(1..=i64::from(BUTTON_COUNT)))]
+        button: u8,
+        /// Function, e.g. back, dpi-up, key:ctrl+c or volume-up (see --help for the list).
+        action: ButtonAction,
+        /// Set the function used while an Easy-Shift button is held.
+        #[arg(short, long)]
+        easy_shift: bool,
+        #[command(flatten)]
+        target: ProfileArg,
+    },
     /// Save the settings of all profiles to FILE.
     Backup { file: PathBuf },
     /// Write the settings from a backup FILE back to the mouse.
@@ -177,6 +199,34 @@ enum Command {
         bytes: Vec<String>,
     },
 }
+
+const BUTTON_FUNCTIONS_HELP: &str = "\
+Functions:
+  disabled
+  click, menu (right click), universal-scroll (middle click), double-click,
+  back, forward, scroll-up, scroll-down
+  key:KEY        a key with modifiers: key:ctrl+c, key:shift+alt+f5, key:home,
+                 or modifiers alone: key:ctrl. Modifiers: ctrl, shift, alt,
+                 super. Keys: a-z, 0-9, f1-f24, enter, esc, tab, space,
+                 backspace, insert, delete, home, end, page-up, page-down, up,
+                 down, left, right, print-screen, kp-0 to kp-9, ..., or a HID
+                 usage such as 0x32
+  mute, volume-up, volume-down, play-pause, stop, next-track, previous-track,
+  browser-search, browser-stop, browser-refresh,
+  consumer:0x0223 (any HID consumer usage)
+  dpi-cycle, dpi-up, dpi-down, profile-cycle, profile-next, profile-previous,
+  profile:N      switch to profile N (1-3)
+  easy-shift     hold for the Easy-Shift layer
+  easy-aim:DPI   use DPI (a multiple of 50 from 100 to 19000) while held;
+                 also easy-aim-200, easy-aim-900
+  easy-wheel-dpi, easy-wheel-volume, easy-wheel-alt-tab, easy-wheel-flip-3d
+                 hold and turn the wheel to change the DPI, the volume, or the
+                 window
+
+Limits, as in the official software: button 1 stays click; button 8 takes only
+the dpi-* and profile-* functions and has no Easy-Shift function; the wheel
+(4, 5) takes no easy-* functions; an Easy-Shift button has no Easy-Shift
+function.";
 
 #[derive(Debug, Args)]
 struct ProfileArg {
@@ -466,7 +516,7 @@ fn main() -> Result<()> {
             if unchanged {
                 println!("unchanged");
             } else {
-                write_safety_backups(&backup.to_text())?;
+                write_safety_backups(&backup)?;
                 mouse.set_debounce(ms)?;
             }
             let active_profile: u8 = mouse.active_profile()?;
@@ -508,6 +558,40 @@ fn main() -> Result<()> {
                 Ok(())
             })?;
         }
+        Command::Buttons { target } => {
+            let mut mouse = open(&manager)?;
+            let active_profile: u8 = mouse.active_profile()?;
+            print_buttons(&mouse.buttons(target.profile)?, active_profile)?;
+        }
+        Command::Button {
+            button,
+            action,
+            easy_shift,
+            target,
+        } => {
+            let layer: Layer = if easy_shift {
+                Layer::EasyShift
+            } else {
+                Layer::Standard
+            };
+            let mut mouse = open(&manager)?;
+            let current: Buttons = mouse.buttons(target.profile)?;
+            let mut buttons: Buttons = current;
+            buttons.set_action(button, layer, action)?;
+            if let ButtonAction::Special(Special::Profile(profile)) = action
+                && !mouse.profiles()?.contains(&profile)
+            {
+                return Err(konectl::Error::UnusedProfile(profile).into());
+            }
+            let active_profile: u8 = mouse.active_profile()?;
+            if buttons == current {
+                println!("unchanged");
+            } else {
+                save_safety_backups(&mut mouse)?;
+                mouse.write_buttons(&buttons)?;
+            }
+            print_buttons(&buttons, active_profile)?;
+        }
         Command::Backup { file } => {
             let backup: Backup = open(&manager)?.backup()?;
             fs::write(&file, backup.to_text())
@@ -534,6 +618,17 @@ fn main() -> Result<()> {
                 backup.profiles.len(),
                 file.display()
             );
+            let without_buttons: usize = backup
+                .profiles
+                .iter()
+                .filter(|profile| profile.buttons.is_none())
+                .count();
+            if without_buttons > 0 {
+                println!(
+                    "{without_buttons} of them have no button assignments in the backup \
+                     (made before konectl 0.3); their buttons were not changed"
+                );
+            }
         }
         Command::Led {
             left,
@@ -659,12 +754,13 @@ fn change(
 /// Saves the settings before konectl changes them: `original.txt` once (the
 /// state before konectl's first change) and `previous.txt` before every change.
 fn save_safety_backups(mouse: &mut KoneProAir<HidTransport>) -> Result<()> {
-    write_safety_backups(&mouse.backup()?.to_text())
+    write_safety_backups(&mouse.backup()?)
 }
 
-/// Writes a backup text as `previous.txt`, and as `original.txt` if that
-/// does not exist yet.
-fn write_safety_backups(text: &str) -> Result<()> {
+/// Writes a backup as `previous.txt`, and as `original.txt` if that does not
+/// exist yet. An `original.txt` without button assignments gets the current ones.
+fn write_safety_backups(backup: &Backup) -> Result<()> {
+    let text: &str = &backup.to_text();
     let directory: PathBuf =
         state_directory(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))?;
     fs::create_dir_all(&directory)
@@ -681,7 +777,9 @@ fn write_safety_backups(text: &str) -> Result<()> {
         .with_context(|| format!("could not remove {}", original_temporary.display()))?;
     match linked {
         Ok(()) => eprintln!("saved the original settings to {}", original.display()),
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            add_buttons_to_original(&original, backup)?;
+        }
         Err(error) => {
             return Err(error).with_context(|| format!("could not write {}", original.display()));
         }
@@ -692,6 +790,49 @@ fn write_safety_backups(text: &str) -> Result<()> {
     write_file(&previous_temporary, text)?;
     fs::rename(&previous_temporary, &previous)
         .with_context(|| format!("could not write {}", previous.display()))
+}
+
+/// Adds the current button assignments to an `original.txt` written by
+/// konectl 0.2 or older, once. A file konectl cannot read is left alone.
+fn add_buttons_to_original(path: &Path, current: &Backup) -> Result<()> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return Ok(());
+    };
+    let Ok(original) = Backup::from_text(&text) else {
+        return Ok(());
+    };
+    let Some(completed) = with_original_buttons(&original, current) else {
+        return Ok(());
+    };
+    let temporary: PathBuf = path.with_extension("txt.tmp");
+    write_file(&temporary, &completed.to_text())?;
+    fs::rename(&temporary, path).with_context(|| format!("could not write {}", path.display()))?;
+    eprintln!("added the current button assignments to {}", path.display());
+    Ok(())
+}
+
+/// `original` with the button assignments of `current` added where it has
+/// none, or `None` if none were missing. konectl 0.2 and older could not
+/// change the buttons, so the current ones are the original ones.
+fn with_original_buttons(original: &Backup, current: &Backup) -> Option<Backup> {
+    let mut completed: Backup = original.clone();
+    let mut added: bool = false;
+    for profile in &mut completed.profiles {
+        if profile.buttons.is_some() {
+            continue;
+        }
+        let number: u8 = profile.settings.profile();
+        if let Some(buttons) = current
+            .profiles
+            .iter()
+            .find(|candidate| candidate.settings.profile() == number)
+            .and_then(|candidate| candidate.buttons)
+        {
+            profile.buttons = Some(buttons);
+            added = true;
+        }
+    }
+    added.then_some(completed)
 }
 
 /// `$XDG_STATE_HOME/konectl`, or `$HOME/.local/state/konectl`.
@@ -762,6 +903,59 @@ fn print_settings(settings: &ProfileSettings, active_profile: u8) {
     if lighting.effect() == Effect::Aimo {
         println!("(with AIMO the mouse reports the colours it shows, not saved ones)");
     }
+}
+
+/// Short names of buttons 1–8.
+const BUTTON_NAMES: [&str; BUTTON_COUNT as usize] = [
+    "left",
+    "right",
+    "wheel click",
+    "wheel up",
+    "wheel down",
+    "side front",
+    "side rear",
+    "profile",
+];
+
+fn print_buttons(buttons: &Buttons, active_profile: u8) -> Result<()> {
+    let profile: u8 = buttons.profile();
+    let active_note: &str = if profile == active_profile {
+        " (active)"
+    } else {
+        ""
+    };
+    println!("profile {profile}{active_note}");
+    println!("{:<16}{:<26}easy-shift", "button", "standard");
+    let mut swarm_functions: bool = false;
+    let mut system_functions: bool = false;
+    for (button, name) in (1u8..).zip(BUTTON_NAMES) {
+        let standard: ButtonAction = buttons.action(button, Layer::Standard)?;
+        let easy_shift: Option<ButtonAction> = if buttons.has_easy_shift_function(button)? {
+            Some(buttons.action(button, Layer::EasyShift)?)
+        } else {
+            None
+        };
+        for action in [Some(standard), easy_shift].into_iter().flatten() {
+            match action {
+                ButtonAction::Host(HostFunction::Swarm(_)) => swarm_functions = true,
+                ButtonAction::Host(HostFunction::System(_)) => system_functions = true,
+                _ => {}
+            }
+        }
+        let easy_shift: String =
+            easy_shift.map_or_else(|| "-".to_owned(), |action| action.to_string());
+        println!(
+            "{:<16}{standard:<26}{easy_shift}",
+            format!("{button} {name}")
+        );
+    }
+    if swarm_functions {
+        println!("(swarm:… functions only work while the official software runs)");
+    }
+    if system_functions {
+        println!("(whether system:… functions work without the official software is untested)");
+    }
+    Ok(())
 }
 
 /// Parses whitespace-separated hex tokens into a zero-padded report.
@@ -915,6 +1109,59 @@ mod tests {
             "15".parse::<LedTimeoutArg>(),
             Ok(LedTimeoutArg::Minutes(15))
         );
+    }
+
+    #[test]
+    fn parses_button_commands() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).map(|_| ());
+        assert!(parse(&["konectl", "buttons"]).is_ok());
+        assert!(parse(&["konectl", "buttons", "-p", "2"]).is_ok());
+        assert!(parse(&["konectl", "button", "7", "back"]).is_ok());
+        assert!(parse(&["konectl", "button", "7", "key:ctrl+c", "--easy-shift"]).is_ok());
+        assert!(parse(&["konectl", "button", "3", "easy-aim:800", "-e", "-p", "2"]).is_ok());
+        assert!(parse(&["konectl", "button", "9", "back"]).is_err());
+        assert!(parse(&["konectl", "button", "0", "back"]).is_err());
+        assert!(parse(&["konectl", "button", "7", "teleport"]).is_err());
+        assert!(parse(&["konectl", "button", "7", "swarm:lock"]).is_err());
+        assert!(parse(&["konectl", "button", "7"]).is_err());
+    }
+
+    #[test]
+    fn original_backups_get_the_buttons_once() {
+        let current = Backup::from_text(
+            "konectl-backup 3
+firmware 4.32
+dongle-firmware unknown
+active-profile 1
+profile 1 entry 01 64 00 00 00
+profile 1 sensor 01 00 00 01 00 00 12 00 00 00 00 00 00 00 08 00 06 0f 00 02
+profile 1 lighting 06 64 64 46 04 00 ff 00 00 ff 64
+profile 1 button-functions 40 40 40 40 45 46 40 40 40 40 40 00 00 00 40 40 00 00 00 00 00 00 00 00 00 00 00 00
+profile 1 buttons 00 01 00 00 02 00 00 03 00 01 00 34 00 00 00 00 00 00 00 07 00 00 08 00
+profile 1 easy-shift-buttons 01 00 24 01 00 25 02 e2 00 00 00 00 00 00 00 00 00 00 02 e9 00 02 ea 00
+",
+        )
+        .expect("current backup");
+        // An original.txt of konectl 0.2, made with other settings.
+        let original = Backup::from_text(
+            "konectl-backup 2
+firmware 4.32
+dongle-firmware 4.19
+active-profile 1
+profile 1 entry 01 64 00 00 00
+profile 1 sensor 01 00 00 01 00 00 0c 00 00 00 00 00 00 00 07 00 06 0f 00 02
+profile 1 lighting 01 64 64 46 04 00 ff 00 00 ff 64
+",
+        )
+        .expect("original backup");
+        let completed = with_original_buttons(&original, &current).expect("buttons added");
+        assert_eq!(completed.profiles[0].buttons, current.profiles[0].buttons);
+        assert_eq!(
+            completed.profiles[0].settings,
+            original.profiles[0].settings
+        );
+        assert_eq!(completed.dongle_firmware, original.dongle_firmware);
+        assert!(with_original_buttons(&completed, &current).is_none());
     }
 
     #[test]
