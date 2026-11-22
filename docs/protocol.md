@@ -6,7 +6,8 @@ how konectl uses it. Fields marked *unknown* still need to be worked out.
 The starting point was the [Eruption](https://github.com/eruption-project/eruption)
 project's Kone Pro Air driver, which documents battery, signal and live LED
 packets. konectl does not reuse Eruption's code. The settings protocol was
-captured from ROCCAT Swarm 1.9482 talking to a mouse with firmware 4.19; see
+captured from ROCCAT Swarm 1.9482 talking to a mouse with firmware 4.32 (dongle
+firmware 4.19); see
 [reverse-engineering.md](reverse-engineering.md) for the method.
 
 ## USB identities
@@ -79,11 +80,13 @@ Answer, payload length `0x26`:
 
 | Offset | Meaning                                                    |
 |--------|------------------------------------------------------------|
-| 4–7    | *unknown* (`00 04 20 00`)                                  |
+| 4      | *unknown* (`00`)                                           |
+| 5–6    | mouse firmware, major and minor: `04 20` = 4.32 (what Swarm shows over the cable) |
+| 7      | *unknown* (`00`)                                           |
 | 8–9    | `92 2c` = `0x2c92`, the cable's product ID (little-endian) |
 | 10–28  | settings block 0, bytes 0–18 (see below)                   |
 | 29     | *unknown* (`00`)                                           |
-| 30–31  | firmware version, major and minor: `04 13` = 4.19 (the version Swarm shows); `00 00` over the cable |
+| 30–31  | dongle firmware, major and minor: `04 13` = 4.19 (what Swarm shows over the dongle); `00 00` over the cable |
 | 32–40  | *unknown* (`00 00 01 04 00 00 01 02 00`; over the cable `00 00 01 04 00 00 00 00 00`) |
 | 41     | debounce time in ms (block 0 byte 19)                      |
 

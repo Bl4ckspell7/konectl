@@ -173,10 +173,10 @@ fn main() -> Result<()> {
             let info = mouse.info()?;
             let settings: ProfileSettings = mouse.settings(target.profile)?;
             print_settings(&settings, info.sensor.profile());
-            let firmware: String = info.firmware.map_or_else(
-                || "unknown (only reported over the dongle)".to_owned(),
-                |firmware| firmware.to_string(),
-            );
+            let firmware: String = match info.dongle_firmware {
+                Some(dongle) => format!("{} (dongle {dongle})", info.firmware),
+                None => info.firmware.to_string(),
+            };
             println!("{:<16}{firmware}", "firmware");
         }
         Command::Profile { profile: None } => {

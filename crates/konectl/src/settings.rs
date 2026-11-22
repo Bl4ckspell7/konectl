@@ -56,11 +56,18 @@ pub(crate) fn profile_index(profile: u8) -> Result<usize> {
     }
 }
 
-/// Firmware version of the mouse.
+/// A firmware version (of the mouse or of the dongle).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Firmware {
     pub major: u8,
     pub minor: u8,
+}
+
+impl Firmware {
+    /// `0.00`: the device reported no version.
+    pub(crate) const fn is_zero(self) -> bool {
+        self.major == 0 && self.minor == 0
+    }
 }
 
 impl fmt::Display for Firmware {
@@ -83,11 +90,14 @@ impl FromStr for Firmware {
     }
 }
 
-/// Answer to the device info request: firmware and the selected profile's block 0.
+/// Answer to the device info request: firmware versions and the selected
+/// profile's block 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Info {
-    /// Firmware version; `None` over the USB cable, which does not report it.
-    pub firmware: Option<Firmware>,
+    /// Firmware of the mouse (what the official software shows over the cable).
+    pub firmware: Firmware,
+    /// Firmware of the wireless dongle; `None` over the USB cable.
+    pub dongle_firmware: Option<Firmware>,
     /// Block 0 of the selected profile; outside of a profile read this is the
     /// active profile.
     pub sensor: Sensor,

@@ -55,7 +55,9 @@ supported products); the mouse needs the legacy **ROCCAT Swarm** (version
 
 On first start Swarm asks for the Kone Pro Air module. Open its *Update
 Center* and install the offered Swarm software update; after the reinstall
-the mouse shows up (no firmware was flashed here, firmware 4.19).
+the mouse shows up (no firmware was flashed here). Over the dongle, Swarm's
+title bar shows the dongle's firmware (4.19 here); connect the cable to see the
+mouse's own firmware (4.32).
 
 **Decline firmware updates.** An interrupted update over USB passthrough can
 brick the mouse, and new firmware may change the protocol.
