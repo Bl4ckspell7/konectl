@@ -59,9 +59,12 @@ const PAYLOAD_OFFSET: usize = 4;
 
 /// Payload length of the info answer.
 const INFO_LEN: u8 = 0x26;
+/// Mouse firmware (major, minor) in the info answer.
+const INFO_FIRMWARE_OFFSET: usize = 5;
 /// Block 0 bytes 0–18 in the info answer; byte 19 (debounce) is elsewhere.
 const INFO_SENSOR_OFFSET: usize = 10;
-const INFO_FIRMWARE_OFFSET: usize = 30;
+/// Dongle firmware (major, minor) in the info answer; zero over the cable.
+const INFO_DONGLE_FIRMWARE_OFFSET: usize = 30;
 const INFO_DEBOUNCE_OFFSET: usize = 41;
 const SENSOR_DEBOUNCE: usize = SENSOR_LEN - 1;
 
@@ -132,7 +135,7 @@ pub fn query_signal() -> Report {
     report_with_prefix(&[OP_READ, CMD_SIGNAL])
 }
 
-/// Asks for the firmware version and block 0 of the selected profile;
+/// Asks for the firmware versions and block 0 of the selected profile;
 /// answered by a report [`parse_info`] accepts.
 pub fn query_info() -> Report {
     request(OP_READ, CMD_INFO, 0, &INFO_KEY)
@@ -244,7 +247,7 @@ pub fn is_info_without_mouse(report: &Report) -> bool {
     is_reply(report, OP_READ, CMD_INFO) && report[2] != INFO_LEN && report[2] != STATUS_LEN
 }
 
-/// Firmware and block 0, if `report` answers [`query_info`].
+/// Firmware versions and block 0, if `report` answers [`query_info`].
 pub fn parse_info(report: &Report) -> Option<Info> {
     if !is_data_reply(report, CMD_INFO, INFO_LEN) {
         return None;
@@ -253,13 +256,15 @@ pub fn parse_info(report: &Report) -> Option<Info> {
     sensor[..SENSOR_DEBOUNCE]
         .copy_from_slice(&report[INFO_SENSOR_OFFSET..INFO_SENSOR_OFFSET + SENSOR_DEBOUNCE]);
     sensor[SENSOR_DEBOUNCE] = report[INFO_DEBOUNCE_OFFSET];
-    let firmware = Firmware {
-        major: report[INFO_FIRMWARE_OFFSET],
-        minor: report[INFO_FIRMWARE_OFFSET + 1],
+    let firmware_at = |offset: usize| Firmware {
+        major: report[offset],
+        minor: report[offset + 1],
     };
+    let dongle_firmware: Firmware = firmware_at(INFO_DONGLE_FIRMWARE_OFFSET);
     Some(Info {
+        firmware: firmware_at(INFO_FIRMWARE_OFFSET),
         // Over the USB cable these bytes are zero.
-        firmware: (firmware != Firmware { major: 0, minor: 0 }).then_some(firmware),
+        dongle_firmware: (!dongle_firmware.is_zero()).then_some(dongle_firmware),
         sensor: Sensor::from_bytes(sensor),
     })
 }
@@ -353,11 +358,19 @@ pub(crate) mod tests {
     use crate::settings::{Effect, LiftOff, PollingRate};
 
     /// Info answer captured at the start (profile 1, 600 DPI on stage 2,
-    /// firmware 4.19, debounce 2 ms).
+    /// mouse firmware 4.32, dongle firmware 4.19, debounce 2 ms).
     pub(crate) const INFO_REPLY: [u8; 42] = [
         0x90, 0x00, 0x26, 0x00, 0x00, 0x04, 0x20, 0x00, 0x92, 0x2c, 0x01, 0x00, 0x00, 0x01, 0x00,
         0x00, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x86, 0x0f, 0x00, 0x00,
         0x04, 0x13, 0x00, 0x00, 0x01, 0x04, 0x00, 0x00, 0x01, 0x02, 0x00, 0x02,
+    ];
+
+    /// Info answer captured over the USB cable (profile 1, 900 DPI on stage 2,
+    /// mouse firmware 4.32, no dongle firmware).
+    pub(crate) const CABLE_INFO_REPLY: [u8; 42] = [
+        0x90, 0x00, 0x26, 0x00, 0x00, 0x04, 0x20, 0x00, 0x92, 0x2c, 0x01, 0x00, 0x00, 0x01, 0x00,
+        0x00, 0x12, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x06, 0x0f, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x01, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
     ];
 
     /// Lighting answer captured at the start (profile 1, wave).
@@ -426,7 +439,11 @@ pub(crate) mod tests {
     #[test]
     fn parses_info_reply() {
         let info = parse_info(&report_with_prefix(&INFO_REPLY)).expect("info reply");
-        assert_eq!(info.firmware.expect("firmware").to_string(), "4.19");
+        assert_eq!(info.firmware.to_string(), "4.32");
+        assert_eq!(
+            info.dongle_firmware.expect("dongle firmware").to_string(),
+            "4.19"
+        );
         assert_eq!(info.sensor.profile(), 1);
         assert_eq!(info.sensor.polling_rate(), Some(PollingRate::Hz1000));
         assert_eq!(
@@ -461,12 +478,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn cable_info_has_no_firmware() {
-        let mut reply: Report = report_with_prefix(&INFO_REPLY);
-        reply[30..32].copy_from_slice(&[0, 0]);
-        let info = parse_info(&reply).expect("info reply");
-        assert_eq!(info.firmware, None);
+    fn cable_info_has_no_dongle_firmware() {
+        let info = parse_info(&report_with_prefix(&CABLE_INFO_REPLY)).expect("info reply");
+        assert_eq!(info.dongle_firmware, None);
+        assert_eq!(info.firmware.to_string(), "4.32");
         assert_eq!(info.sensor.profile(), 1);
+        assert_eq!(info.sensor.dpi(2).expect("stage 2"), Some(900));
     }
 
     #[test]

@@ -11,8 +11,8 @@ use crate::color::Rgb;
 use crate::error::{Error, Result};
 use crate::protocol::{self, Battery, Report, Signal, Status};
 use crate::settings::{
-    Effect, Info, Lighting, PROFILE_COUNT, ProfileEntry, ProfileSettings, Sensor, profile_in_use,
-    profile_index,
+    Effect, Firmware, Info, Lighting, PROFILE_COUNT, ProfileEntry, ProfileSettings, Sensor,
+    profile_in_use, profile_index,
 };
 use crate::transport::{HidTransport, Transport};
 
@@ -181,7 +181,7 @@ impl<T: Transport> KoneProAir<T> {
             .write_report(&protocol::set_leds(left, right))
     }
 
-    /// Firmware version and the sensor settings of the active profile.
+    /// Firmware versions and the sensor settings of the active profile.
     ///
     /// Every settings read starts here, so it fails with [`Error::NotReachable`]
     /// while the mouse sleeps or is switched off.
@@ -303,22 +303,32 @@ impl<T: Transport> KoneProAir<T> {
             }
         }
         Ok(Backup {
-            firmware: info.firmware,
+            firmware: (!info.firmware.is_zero()).then_some(info.firmware),
+            dongle_firmware: info.dongle_firmware,
             active_profile: info.sensor.profile(),
             profiles,
         })
     }
 
-    /// Checks that `backup` fits the mouse: if both the backup and the mouse
-    /// name a firmware version, they must match.
+    /// Checks that `backup` fits the mouse: the firmware versions it records
+    /// must match the mouse's, and the dongle's when both are known.
     pub fn check_backup(&mut self, backup: &Backup) -> Result<()> {
-        if let (Some(mouse_firmware), Some(backup_firmware)) =
-            (self.info()?.firmware, backup.firmware)
-            && mouse_firmware != backup_firmware
+        let info: Info = self.info()?;
+        let mismatch = |device: &str, saved: Firmware, now: Firmware| {
+            Error::InvalidBackup(format!(
+                "it was made with {device} firmware {saved}, the {device} has {now}"
+            ))
+        };
+        if let Some(saved) = backup.firmware
+            && !info.firmware.is_zero()
+            && saved != info.firmware
         {
-            return Err(Error::InvalidBackup(format!(
-                "it was made with firmware {backup_firmware}, the mouse has {mouse_firmware}"
-            )));
+            return Err(mismatch("mouse", saved, info.firmware));
+        }
+        if let (Some(saved), Some(now)) = (backup.dongle_firmware, info.dongle_firmware)
+            && saved != now
+        {
+            return Err(mismatch("dongle", saved, now));
         }
         Ok(())
     }
@@ -497,7 +507,9 @@ mod tests {
 
     use super::*;
     use crate::protocol::report_with_prefix;
-    use crate::protocol::tests::{INFO_REPLY, LIGHTING_REPLY, PROFILE_TABLE_REPLY};
+    use crate::protocol::tests::{
+        CABLE_INFO_REPLY, INFO_REPLY, LIGHTING_REPLY, PROFILE_TABLE_REPLY,
+    };
     use crate::settings::{Lighting, Sensor};
 
     /// Replays canned replies: each write releases the next batch of replies.
@@ -728,6 +740,48 @@ mod tests {
                 .iter()
                 .all(|report| report[..4] != [0x10, 0x50, 0x0b, 0x01])
         );
+    }
+
+    fn firmware(major: u8, minor: u8) -> Option<Firmware> {
+        Some(Firmware { major, minor })
+    }
+
+    /// Checks a backup with these firmware versions against `info_reply`.
+    fn check_backup(
+        info_reply: &[u8],
+        mouse: Option<Firmware>,
+        dongle: Option<Firmware>,
+    ) -> Result<()> {
+        let backup = Backup {
+            firmware: mouse,
+            dongle_firmware: dongle,
+            active_profile: 1,
+            profiles: Vec::new(),
+        };
+        connect(vec![vec![report_with_prefix(info_reply)]]).check_backup(&backup)
+    }
+
+    #[test]
+    fn backup_must_match_the_firmware() {
+        // INFO_REPLY: mouse 4.32, dongle 4.19.
+        assert!(check_backup(&INFO_REPLY, firmware(4, 32), firmware(4, 19)).is_ok());
+        assert!(check_backup(&INFO_REPLY, None, None).is_ok());
+        assert!(matches!(
+            check_backup(&INFO_REPLY, firmware(4, 31), firmware(4, 19)),
+            Err(Error::InvalidBackup(_))
+        ));
+        // A konectl 0.1 backup records only the dongle firmware.
+        assert!(check_backup(&INFO_REPLY, None, firmware(4, 19)).is_ok());
+        assert!(matches!(
+            check_backup(&INFO_REPLY, None, firmware(4, 18)),
+            Err(Error::InvalidBackup(_))
+        ));
+        // Over the cable the dongle firmware cannot be compared.
+        assert!(check_backup(&CABLE_INFO_REPLY, firmware(4, 32), firmware(4, 18)).is_ok());
+        assert!(matches!(
+            check_backup(&CABLE_INFO_REPLY, firmware(4, 31), None),
+            Err(Error::InvalidBackup(_))
+        ));
     }
 
     #[test]
