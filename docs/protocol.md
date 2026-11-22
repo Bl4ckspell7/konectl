@@ -5,7 +5,9 @@ how konectl uses it. Fields marked *unknown* still need to be worked out.
 
 The starting point was the [Eruption](https://github.com/eruption-project/eruption)
 project's Kone Pro Air driver, which documents battery, signal and live LED
-packets. konectl does not reuse Eruption's code.
+packets. konectl does not reuse Eruption's code. The settings protocol was
+captured from ROCCAT Swarm 1.9482 talking to a mouse with firmware 4.19; see
+[reverse-engineering.md](reverse-engineering.md) for the method.
 
 ## USB identities
 
@@ -27,15 +29,162 @@ interfaces 1 and 2.
 - Answers come back as input reports on the same interface. Other reports can
   arrive in between, so readers must match the answer by its header and skip the rest.
 
-All byte offsets below are into the 64-byte payload. Bytes that are not listed are `00`.
+All byte offsets below are into the 64-byte report. Bytes that are not listed are `00`.
+
+## Report format
+
+| Offset | Request                                   | Data answer           |
+|--------|-------------------------------------------|-----------------------|
+| 0      | `90` = read, `10` = write                 | echo                  |
+| 1      | command                                   | echo                  |
+| 2      | payload length                            | payload length        |
+| 3      | block number for `10 50`, otherwise `00`  | `00`                  |
+| 4…     | payload                                   | payload               |
+
+Short answers of the form `<op> <cmd> 03 00 ec <status> [code]` look like
+status replies:
+
+- `ec ac`: the write was accepted. Every write Swarm sends is answered this way.
+- `ec fa <code>`: an error. It is seen for `90 00` without its payload (code `03`),
+  for `90 70` over the cable (code `02`, no radio link), and for `90 0a` and
+  `90 70` while the mouse sleeps (code `0d`).
+
+While the mouse sleeps (or is switched off) the dongle answers on its own: the
+info request gets `90 00 39 00` followed by zeros, battery and signal get the
+error `0d`. Moving the mouse wakes it up.
 
 ## Commands
 
-### Init: `90 00`
+| Request                     | Meaning                                       |
+|-----------------------------|-----------------------------------------------|
+| `90 00 04 00 18 25 51 32`   | device info + settings block 0 of the selected profile |
+| `90 01`, `90 02`, `90 04`, `90 05` | settings blocks 1, 2, 3, 4 of the selected profile |
+| `10 50 <len> <block> …`     | write a settings block                        |
+| `90 11` / `10 11`           | profile table                                 |
+| `10 13 01 00 <p>`           | select the profile that reads return          |
+| `10 03 01 00 <p>`           | set the active profile                        |
+| `90 0a`                     | battery                                       |
+| `90 70`                     | signal                                        |
+| `10 10 0b 00 …`             | live LED colours (not saved)                  |
+| `90 09`, `90 71`, `90 72`, `10 0a`, `10 71`, `10 72` | *unknown*, see below |
 
-Sent once after opening the device. Answer: `90 00 03 00 ec fa 03 00 …`
-(content not understood). konectl waits for it, so it cannot be mistaken for
-the reply to the next request.
+### Device info: `90 00 04 00 18 25 51 32`
+
+Swarm always sends the payload `18 25 51 32`; its meaning is *unknown*. Without
+it (`90 00` alone) the answer is the error `90 00 03 00 ec fa 03`. konectl sends
+the bare `90 00` once after opening the device and waits for that answer, so it
+cannot be mistaken for the reply to the next request.
+
+Answer, payload length `0x26`:
+
+| Offset | Meaning                                                    |
+|--------|------------------------------------------------------------|
+| 4–7    | *unknown* (`00 04 20 00`)                                  |
+| 8–9    | `92 2c` = `0x2c92`, the cable's product ID (little-endian) |
+| 10–28  | settings block 0, bytes 0–18 (see below)                   |
+| 29     | *unknown* (`00`)                                           |
+| 30–31  | firmware version, major and minor: `04 13` = 4.19 (the version Swarm shows); `00 00` over the cable |
+| 32–40  | *unknown* (`00 00 01 04 00 00 01 02 00`; over the cable `00 00 01 04 00 00 00 00 00`) |
+| 41     | debounce time in ms (block 0 byte 19)                      |
+
+### Profiles
+
+The mouse has five profile slots; Swarm uses slots 1–3.
+
+- `10 13 01 00 <p>` selects profile `p` for the reads that follow (`90 00` and
+  `90 01`…`90 05`). Swarm selects each profile in turn when it starts, and
+  selects the active one again at the end.
+- `10 03 01 00 <p>` makes profile `p` the active one. Swarm sends it on *Apply*
+  when another profile slot was chosen.
+- `90 11` returns the profile table: 5 entries of 5 bytes. Slots 1–3 hold
+  `01 64 00 00 00`, slots 4 and 5 are zero. The meaning of the bytes is *unknown*.
+- `10 11 06 00 <p> <5 bytes>` writes entry `p` of the table. Swarm sends it
+  before the block writes of each profile, with the bytes it read.
+
+### Settings blocks
+
+| Block | Read                  | Write                 | Length | Content                    |
+|-------|-----------------------|-----------------------|--------|----------------------------|
+| 0     | `90 00 04 00 18 25 51 32` (offset 10) | `10 50 14 00 …` | 20 | DPI, polling rate, lift-off, debounce |
+| 1     | `90 01` (offset 4)    | `10 50 0b 01 …`       | 11     | saved lighting             |
+| 2     | `90 02` (offset 4)    | `10 50 1c 02 …`       | 28     | *unknown*                  |
+| 3     | `90 04` (offset 4)    | `10 50 18 03 …`       | 24     | button assignment (layout *unknown*) |
+| 4     | `90 05` (offset 4)    | `10 50 18 04 …`       | 24     | Easy-Shift assignment (layout *unknown*) |
+
+Writes take effect immediately and are kept: Swarm reads them back after a
+restart. There is no separate save command.
+
+#### Block 0: sensor and DPI
+
+Offsets are into the block (write: report offset 4 + n; read: offset 10 + n).
+
+| Byte  | Meaning                                                        |
+|-------|----------------------------------------------------------------|
+| 0     | profile number, 1–5                                            |
+| 1     | polling rate: `00` = 1000 Hz, `01` = 500, `02` = 250, `03` = 125 |
+| 2     | angle snapping: `00` = off, `01` = on                          |
+| 3     | active DPI stage, 0-based                                      |
+| 4–13  | DPI stages 1–5, little-endian `u16` each, in steps of 50 DPI (`0x0012` = 900). `0` = stage disabled |
+| 14    | lift-off distance: `06` = very low, `07` = low                 |
+| 15    | *unknown* (`00`)                                               |
+| 16    | *unknown* (`06` in slot 1, `00` in slots 2–3); reads have shown bit 7 set (`86`), Swarm writes it cleared |
+| 17    | *unknown* (`0f`)                                               |
+| 18    | *unknown* (`00`)                                               |
+| 19    | debounce time in ms (write only; the read returns it at offset 41) |
+
+All of block 0 is stored per profile. Swarm shows only one debounce time and
+writes it into every profile; the others are set per profile in Swarm.
+
+Swarm's slider goes from 50 to 19000 DPI. A disabled stage is stored as `0` and
+shown as 50.
+
+#### Block 1: saved lighting
+
+| Byte | Meaning                                                    |
+|------|------------------------------------------------------------|
+| 0    | effect (table below)                                       |
+| 1–2  | *unknown* (`64 64`)                                        |
+| 3    | brightness, 0–100 (`0x64`)                                 |
+| 4    | speed, 1–11 (`0x01`–`0x0b`)                                |
+| 5–7  | left zone R, G, B                                          |
+| 8–10 | right zone R, G, B                                         |
+
+| Effect | Name in Swarm                    |
+|--------|----------------------------------|
+| `00`   | lighting off                     |
+| `01`   | fully lit (static)               |
+| `02`   | breathing                        |
+| `05`   | heartbeat                        |
+| `06`   | wave                             |
+| `08`   | blinking                         |
+| `09`   | AIMO (intelligent lighting)      |
+| `0a`   | battery indication (Swarm sets brightness to 100) |
+
+The colours are kept when switching effects. With effect `09`, `90 01` answers
+with the colours that are currently shown, not the saved ones.
+
+### Apply sequence (Swarm)
+
+On *Apply*, Swarm rewrites everything, waiting for the `ec ac` answer after each write:
+
+1. `10 11 06 00 04`, `10 11 06 00 05` (clears the unused slots 4 and 5)
+2. `10 71 05 00 aa 03 00 aa aa`, `10 72 01`: the bytes it read with `90 71`
+   and `90 72` at start-up
+3. for each profile 1–3: `10 11` (table entry), then blocks 0, 1, 2, 3 and 4 (`10 50`)
+
+Writing only the table entry and the changed block of one profile is enough.
+Replaying `10 11 06 00 01 01 64`, a block 0 write and a block 1 write from
+Linux changed the settings, and they read back correctly.
+
+konectl changes settings the same way: it reads blocks 0 and 1 of the
+profile, changes only the fields it knows, writes the table entry (as read)
+and both blocks, and reads them back to check them.
+
+Swarm quirks seen in the captures:
+
+- Each *Apply* stores the brightness one lower than it read (70 → 69); it
+  converts it through the slider position.
+- Enabling a stage without changing its value (still shown as 50) sends nothing.
 
 ### Battery: `90 0a`
 
@@ -45,7 +194,7 @@ the reply to the next request.
 | 10            | battery level, percent (values > 100 *unknown*; konectl reports them as unknown) |
 | 4, 6          | `01` on cable, `00` on battery; charging flag? |
 | 8–9           | little-endian; 2788–2789 on battery, 2866 charging; voltage-related? |
-| 2, 5          | *unknown* (always `04`, `32` so far) |
+| 2, 5          | `04` (payload length) and *unknown* (`32` so far) |
 
 Observed answers:
 
@@ -60,36 +209,38 @@ Observed answers:
 | Answer offset | Meaning                                         |
 |---------------|-------------------------------------------------|
 | 0–1           | `90 70` (echo)                                  |
-| 4             | raw signal value; `236` (`0xec`) = radio off    |
+| 4             | raw signal value                                |
 
 The unit of the raw value is *unknown*. konectl estimates quality as
 `clamp(128 - raw, 0, 100)` %.
 
 Observed answers:
 
-- dongle, mouse ~1 m away: `90 70 01 00 37 00 …`; the raw value varies between reads (55–59).
-- cable: `90 70 03 00 ec fa 02 00 …`, raw `0xec` = radio off.
+- dongle, mouse ~1 m away: `90 70 01 00 37 00 …`; the raw value varies between reads (53–59).
+- cable: `90 70 03 00 ec fa 02 00 …`, the error status reply (no radio link).
+  konectl treats `0xec` at offset 4 as "radio off".
 
 ### Live LED colours: `10 10 0b 00 09 64 64 64 06`
 
+The payload has the layout of [block 1](#block-1-saved-lighting): effect `09`,
+`64 64`, brightness 100, speed 6, then the colours.
+
 | Offset | Meaning                                   |
 |--------|-------------------------------------------|
-| 0–8    | fixed header; meaning of bytes 1–8 *unknown* (`0x64` = 100?) |
+| 4–8    | effect, `64 64`, brightness, speed        |
 | 9–11   | left zone R, G, B                         |
 | 12–14  | right zone R, G, B                        |
 
 - Volatile: the colours stay while the mouse is in use, but once it goes to sleep
   it wakes with its stored effect again (e.g. rainbow). Nothing is saved.
-- Answer: `10 10 03 00 ec ac 00 …`; bytes 2–5 *unknown* (checksum?).
+- Answer: `10 10 03 00 ec ac 00 …` (accepted).
 - Brightness is applied by scaling the RGB values in software.
 
-## Unknown (phase 2)
+### Not understood yet
 
-To be captured from the official software (Swarm II):
-
-- DPI stages (set, read, active stage)
-- polling rate, lift-off distance
-- profiles, button mapping
-- stored LED effects (static, wave, breathing, …) and brightness
-- firmware version
-- save/commit command
+- `90 09`: answer `90 09 01 00 cc`. Swarm polls it every few seconds, together with `90 70`.
+- `10 0a 01 00 <b>`: Swarm sends `01` once when it starts, and `00` after
+  reading the battery.
+- `90 71` (answer `aa 03 00 aa aa`) and `90 72` (answer `01`): written back
+  unchanged by every *Apply*.
+- Blocks 2–4, the bytes of the profile table, block 0 bytes 15–18.
