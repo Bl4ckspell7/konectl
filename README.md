@@ -15,9 +15,11 @@ to the mouse directly over hidraw.
 | DPI stages and active stage               | ✅     |
 | Polling rate, lift-off distance           | ✅     |
 | Angle snapping, debounce time             | ✅     |
+| LED time-out, energy saving               | ✅     |
+| DPI "AUTO" flags, lift-off calibration, colour intensity | ✅ |
 | Saved lighting (effect, colours, brightness, speed) | ✅ |
 | Profiles (show, activate, per-profile settings) | ✅ |
-| Backup and restore of these settings      | ✅     |
+| Backup and restore of the per-profile settings (not energy saving or the lift-off calibration) | ✅ |
 | Live LED colours (lost on sleep)          | ✅     |
 | Button assignment, macros                 | ❌ not decoded |
 
@@ -79,7 +81,13 @@ konectl rate 1000               # polling rate: 125, 250, 500 or 1000 Hz
 konectl liftoff low             # lift-off distance: very-low or low
 konectl angle-snapping off      # angle snapping: on or off
 konectl debounce 2              # debounce time in ms (0–10), set in all profiles
+konectl liftoff calibrate       # measure your surface, then use "custom" in all profiles
+konectl dpi-auto 2 on           # the "AUTO" flag of DPI stage 2
+konectl led-timeout 5 -e breathing   # after 5 idle minutes: breathing (or off, static, …)
+konectl led-timeout never       # the LEDs never time out
+konectl energy-saving on        # energy saving: on or off (all profiles)
 konectl lighting static --left ff0000 --right 0000ff -b 60
+konectl lighting static --intensity 50   # colour intensity (also --left-/--right-intensity)
 konectl lighting wave -s 4      # effects: off, static, breathing, heartbeat,
                                 #          wave, blinking, aimo, battery
 konectl profile                 # profiles in use; konectl profile 2 activates one
