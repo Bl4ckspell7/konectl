@@ -1,30 +1,39 @@
 //! Text backups of the settings konectl changes.
 //!
 //! A backup holds, for every profile in use, the profile table entry and the
-//! raw settings blocks 0 and 1 as read from the mouse, plus the active profile.
-//! Restoring writes exactly these bytes back. Example:
+//! raw settings blocks 0–4 as read from the mouse, plus the active profile.
+//! Restoring writes exactly these bytes back. Example (one profile):
 //!
 //! ```text
-//! konectl-backup 2
+//! konectl-backup 3
 //! firmware 4.32
 //! dongle-firmware 4.19
 //! active-profile 1
 //! profile 1 entry 01 64 00 00 00
 //! profile 1 sensor 01 00 00 01 00 00 12 00 00 00 00 00 00 00 07 00 06 0f 00 02
 //! profile 1 lighting 06 64 64 46 04 00 ff 00 00 ff 64
+//! profile 1 button-functions 40 40 40 40 45 46 40 40 40 40 40 00 00 00 40 40 00 00 00 00 00 00 00 00 00 00 00 00
+//! profile 1 buttons 00 01 00 00 02 00 00 03 00 01 00 34 00 00 00 00 00 00 00 07 00 00 08 00
+//! profile 1 easy-shift-buttons 01 00 24 01 00 25 02 e2 00 00 00 00 00 00 00 00 00 00 02 e9 00 02 ea 00
 //! ```
+//!
+//! Backups of konectl 0.2 (version 2) and 0.1 (version 1) have no button lines;
+//! restoring them leaves the buttons alone.
 
 use std::fmt::Write as _;
 
+use crate::buttons::{Buttons, ENTRIES_LEN, FUNCTIONS_LEN, Layer};
 use crate::error::{Error, Result};
 use crate::settings::{
     Firmware, LIGHTING_LEN, Lighting, PROFILE_ENTRY_LEN, ProfileEntry, ProfileSettings, SENSOR_LEN,
     Sensor, profile_in_use, profile_index,
 };
 
-const HEADER: &str = "konectl-backup 2";
+const HEADER: &str = "konectl-backup 3";
+/// Written by konectl 0.2: no button lines.
+const HEADER_V2: &str = "konectl-backup 2";
 /// Written by konectl 0.1, whose firmware line held the dongle's version and
-/// which had no dongle-firmware line.
+/// which had no dongle-firmware and no button lines.
 const HEADER_V1: &str = "konectl-backup 1";
 const UNKNOWN_FIRMWARE: &str = "unknown";
 
@@ -47,6 +56,10 @@ pub struct ProfileBackup {
     /// Profile table entry, written back unchanged.
     pub entry: ProfileEntry,
     pub settings: ProfileSettings,
+    /// Button assignments; `None` if the backup has no button lines for the
+    /// profile, as backups made before konectl 0.3. Restoring then leaves the
+    /// buttons alone.
+    pub buttons: Option<Buttons>,
 }
 
 impl Backup {
@@ -72,6 +85,23 @@ impl Backup {
                 "profile {number} lighting {}",
                 hex(&profile.settings.lighting.bytes())
             );
+            if let Some(buttons) = &profile.buttons {
+                let _ = writeln!(
+                    text,
+                    "profile {number} button-functions {}",
+                    hex(buttons.functions())
+                );
+                let _ = writeln!(
+                    text,
+                    "profile {number} buttons {}",
+                    hex(buttons.entries(Layer::Standard))
+                );
+                let _ = writeln!(
+                    text,
+                    "profile {number} easy-shift-buttons {}",
+                    hex(buttons.entries(Layer::EasyShift))
+                );
+            }
         }
         text
     }
@@ -83,15 +113,18 @@ impl Backup {
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty() && !line.starts_with('#'));
-        let version_1: bool = match lines.next() {
-            Some(HEADER) => false,
-            Some(HEADER_V1) => true,
+        let version: u8 = match lines.next() {
+            Some(HEADER) => 3,
+            Some(HEADER_V2) => 2,
+            Some(HEADER_V1) => 1,
             _ => {
                 return Err(invalid(format!(
-                    "first line must be {HEADER:?} (or {HEADER_V1:?} from konectl 0.1)"
+                    "first line must be {HEADER:?} (or {HEADER_V2:?} or {HEADER_V1:?} from \
+                     older konectl versions)"
                 )));
             }
         };
+        let version_1: bool = version == 1;
 
         let mut firmware: Option<Option<Firmware>> = None;
         let mut dongle_firmware: Option<Option<Firmware>> = None;
@@ -124,7 +157,7 @@ impl Backup {
                             parts.len() - 1
                         }
                     };
-                    parts[index].set(kind, bytes)?;
+                    parts[index].set(kind, bytes, version)?;
                 }
                 _ => return Err(invalid(format!("unexpected line {line:?}"))),
             }
@@ -167,6 +200,9 @@ struct ProfileParts {
     entry: Option<ProfileEntry>,
     sensor: Option<[u8; SENSOR_LEN]>,
     lighting: Option<[u8; LIGHTING_LEN]>,
+    button_functions: Option<[u8; FUNCTIONS_LEN]>,
+    buttons: Option<[u8; ENTRIES_LEN]>,
+    easy_shift_buttons: Option<[u8; ENTRIES_LEN]>,
 }
 
 impl ProfileParts {
@@ -176,11 +212,21 @@ impl ProfileParts {
             entry: None,
             sensor: None,
             lighting: None,
+            button_functions: None,
+            buttons: None,
+            easy_shift_buttons: None,
         }
     }
 
-    fn set(&mut self, kind: &str, bytes: &[&str]) -> Result<()> {
+    fn set(&mut self, kind: &str, bytes: &[&str], version: u8) -> Result<()> {
         let duplicate = || invalid(format!("profile {} has two {kind} lines", self.number));
+        let button_line: bool =
+            matches!(kind, "button-functions" | "buttons" | "easy-shift-buttons");
+        if button_line && version < 3 {
+            return Err(invalid(format!(
+                "a version {version} backup has no {kind} lines"
+            )));
+        }
         match kind {
             "entry" if self.entry.is_none() => {
                 self.entry = Some(parse_hex::<PROFILE_ENTRY_LEN>(bytes)?)
@@ -191,7 +237,17 @@ impl ProfileParts {
             "lighting" if self.lighting.is_none() => {
                 self.lighting = Some(parse_hex::<LIGHTING_LEN>(bytes)?);
             }
-            "entry" | "sensor" | "lighting" => return Err(duplicate()),
+            "button-functions" if self.button_functions.is_none() => {
+                self.button_functions = Some(parse_hex::<FUNCTIONS_LEN>(bytes)?);
+            }
+            "buttons" if self.buttons.is_none() => {
+                self.buttons = Some(parse_hex::<ENTRIES_LEN>(bytes)?);
+            }
+            "easy-shift-buttons" if self.easy_shift_buttons.is_none() => {
+                self.easy_shift_buttons = Some(parse_hex::<ENTRIES_LEN>(bytes)?);
+            }
+            "entry" | "sensor" | "lighting" | "button-functions" | "buttons"
+            | "easy-shift-buttons" => return Err(duplicate()),
             _ => return Err(invalid(format!("unknown field {kind:?}"))),
         }
         Ok(())
@@ -215,9 +271,26 @@ impl ProfileParts {
                 sensor.profile()
             )));
         }
+        let buttons: Option<Buttons> =
+            match (self.button_functions, self.buttons, self.easy_shift_buttons) {
+                (Some(functions), Some(standard), Some(easy_shift)) => Some(Buttons::from_blocks(
+                    self.number,
+                    functions,
+                    standard,
+                    easy_shift,
+                )),
+                (None, None, None) => None,
+                _ => {
+                    return Err(invalid(format!(
+                        "profile {} needs all three button lines or none",
+                        self.number
+                    )));
+                }
+            };
         Ok(ProfileBackup {
             entry,
             settings: ProfileSettings { sensor, lighting },
+            buttons,
         })
     }
 }
@@ -282,17 +355,30 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    const TEXT: &str = "konectl-backup 2
+    /// Profile 1 with button lines, profile 2 without.
+    const TEXT: &str = "konectl-backup 3
 firmware 4.32
 dongle-firmware 4.19
 active-profile 1
 profile 1 entry 01 64 00 00 00
 profile 1 sensor 01 00 00 01 00 00 12 00 00 00 00 00 00 00 07 00 06 0f 00 02
 profile 1 lighting 06 64 64 46 04 00 ff 00 00 ff 64
+profile 1 button-functions 40 40 40 40 45 46 40 40 40 40 40 00 00 00 40 40 00 00 00 00 00 00 00 00 00 00 00 00
+profile 1 buttons 00 01 00 00 02 00 00 03 00 01 00 34 00 00 00 00 00 00 00 07 00 00 08 00
+profile 1 easy-shift-buttons 01 00 24 01 00 25 02 e2 00 00 00 00 00 00 00 00 00 00 02 e9 00 02 ea 00
 profile 2 entry 01 64 00 00 00
 profile 2 sensor 02 00 00 01 00 00 0c 00 00 00 00 00 00 00 06 00 00 0f 00 02
 profile 2 lighting 01 64 64 3c 06 f4 00 00 32 a6 20
 ";
+
+    /// TEXT as konectl 0.2 wrote it: version 2, no button lines.
+    fn version_2_text() -> String {
+        TEXT.replace("konectl-backup 3", "konectl-backup 2")
+            .lines()
+            .filter(|line| !line.contains("buttons") && !line.contains("button-functions"))
+            .map(|line| format!("{line}\n"))
+            .collect()
+    }
 
     #[test]
     fn round_trip() {
@@ -309,7 +395,28 @@ profile 2 lighting 01 64 64 3c 06 f4 00 00 32 a6 20
             backup.profiles[1].settings.sensor.dpi(2).expect("stage"),
             Some(600)
         );
+        assert_eq!(
+            backup.profiles[0].buttons,
+            Some(crate::buttons::tests::start_buttons())
+        );
+        assert_eq!(backup.profiles[1].buttons, None);
         assert_eq!(backup.to_text(), TEXT);
+    }
+
+    #[test]
+    fn version_2_backups_have_no_buttons() {
+        let text: String = version_2_text();
+        let backup = Backup::from_text(&text).expect("valid backup");
+        assert!(
+            backup
+                .profiles
+                .iter()
+                .all(|profile| profile.buttons.is_none())
+        );
+        assert_eq!(
+            backup.to_text(),
+            text.replace("konectl-backup 2", "konectl-backup 3")
+        );
     }
 
     #[test]
@@ -322,7 +429,7 @@ profile 2 lighting 01 64 64 3c 06 f4 00 00 32 a6 20
 
     #[test]
     fn version_1_backups_have_no_mouse_firmware() {
-        let text: String = TEXT
+        let text: String = version_2_text()
             .replace("konectl-backup 2", "konectl-backup 1")
             .replace("dongle-firmware 4.19\n", "")
             .replace("firmware 4.32", "firmware 4.19");
@@ -336,7 +443,7 @@ profile 2 lighting 01 64 64 3c 06 f4 00 00 32 a6 20
         assert!(
             backup
                 .to_text()
-                .starts_with("konectl-backup 2\nfirmware unknown\ndongle-firmware 4.19\n")
+                .starts_with("konectl-backup 3\nfirmware unknown\ndongle-firmware 4.19\n")
         );
     }
 
@@ -348,8 +455,10 @@ profile 2 lighting 01 64 64 3c 06 f4 00 00 32 a6 20
 
     #[test]
     fn rejects_broken_backups() {
-        let broken: [String; 15] = [
-            TEXT.replace("konectl-backup 2", "konectl-backup 3"),
+        let button_line: &str = "profile 1 buttons 00 01 00 00 02 00 00 03 00 01 00 34 00 00 00 00 \
+                                 00 00 00 07 00 00 08 00\n";
+        let broken: [String; 20] = [
+            TEXT.replace("konectl-backup 3", "konectl-backup 4"),
             TEXT.replace("firmware 4.32\n", ""),
             TEXT.replace("active-profile 1", "active-profile 3"),
             TEXT.replace("profile 2 lighting 01 64 64 3c 06 f4 00 00 32 a6 20\n", ""),
@@ -362,8 +471,16 @@ profile 2 lighting 01 64 64 3c 06 f4 00 00 32 a6 20
             TEXT.replace("ff 64\n", "+f 64\n"),
             TEXT.replace("profile 2 entry 01 64", "profile 2 entry 00 00"),
             format!("{TEXT}dongle-firmware 4.19\n"),
-            TEXT.replace("konectl-backup 2", "konectl-backup 1"),
+            TEXT.replace("konectl-backup 3", "konectl-backup 1"),
             TEXT.replace("dongle-firmware 4.19", "dongle-firmware 4"),
+            // Button lines: only in version 3, all three or none, full length.
+            TEXT.replace("konectl-backup 3", "konectl-backup 2"),
+            TEXT.replace(button_line, ""),
+            format!("{TEXT}{button_line}"),
+            TEXT.replace("02 ea 00\n", "02 ea\n"),
+            format!(
+                "{TEXT}profile 2 buttons 00 01 00 00 02 00 00 03 00 01 00 34 00 00 00 00 00 00 00 07 00 00 08 00\n"
+            ),
         ];
         for text in &broken {
             assert!(

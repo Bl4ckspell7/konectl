@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use hidapi::HidApi;
 
 use crate::backup::{Backup, ProfileBackup};
+use crate::buttons::{Buttons, Layer};
 use crate::color::Rgb;
 use crate::error::{Error, Result};
 use crate::protocol::{self, Battery, Report, Signal, Status};
@@ -347,23 +348,31 @@ impl<T: Transport> KoneProAir<T> {
     /// is interrupted in between, the mouse keeps reporting the other profile
     /// as active until a profile is activated with [`Self::set_active_profile`].
     pub fn settings(&mut self, profile: Option<u8>) -> Result<ProfileSettings> {
-        let active: u8 = self.active_profile()?;
-        let target: u8 = profile.unwrap_or(active);
-        if target == active {
-            return self.read_selected();
-        }
-        self.profile_entry(target)?;
-        self.command(&protocol::select_profile(target), "profile selection")?;
-        let settings: Result<ProfileSettings> = self.read_selected();
-        // Select the active profile again even if the reads failed.
-        let restored: Result<()> =
-            self.command(&protocol::select_profile(active), "profile selection");
-        let settings: ProfileSettings = settings?;
-        restored?;
-        if settings.profile() != target {
-            return Err(Error::VerifyFailed("profile selection"));
-        }
-        Ok(settings)
+        self.read_profile(profile, Self::read_selected_settings)
+    }
+
+    /// Reads the button assignments of `profile` (1–5), or of the active
+    /// profile with `None`. Selects the profile like [`Self::settings`].
+    pub fn buttons(&mut self, profile: Option<u8>) -> Result<Buttons> {
+        self.read_profile(profile, |mouse, target| {
+            // Blocks 2–4 do not name their profile; block 0 does.
+            mouse.read_selected_sensor(target)?;
+            mouse.read_selected_buttons(target)
+        })
+    }
+
+    /// Writes button assignments to the profile they belong to and checks
+    /// that they read back unchanged.
+    ///
+    /// Block writes go to the profile named in the last block 0 written, so
+    /// this writes the profile's table entry and block 0 as read, then
+    /// settings blocks 2, 3 and 4, the order of the official software. The
+    /// saved lighting is left alone.
+    pub fn write_buttons(&mut self, buttons: &Buttons) -> Result<()> {
+        let profile: u8 = buttons.profile();
+        let entry: ProfileEntry = self.profile_entry(profile)?;
+        let sensor: Sensor = self.read_profile(Some(profile), Self::read_selected_sensor)?;
+        self.write_blocks(&entry, &sensor, None, Some(buttons))
     }
 
     /// Writes `settings` to the profile they belong to and checks that they
@@ -378,7 +387,7 @@ impl<T: Transport> KoneProAir<T> {
     /// colours. Use [`Self::write_sensor`] when only the sensor settings changed.
     pub fn write_settings(&mut self, settings: &ProfileSettings) -> Result<()> {
         let entry: ProfileEntry = self.profile_entry(settings.profile())?;
-        self.write_blocks(&entry, &settings.sensor, Some(&settings.lighting))
+        self.write_blocks(&entry, &settings.sensor, Some(&settings.lighting), None)
     }
 
     /// Writes only block 0 ([`Sensor`]: polling rate, DPI stages and AUTO
@@ -387,7 +396,7 @@ impl<T: Transport> KoneProAir<T> {
     /// back unchanged. The saved lighting is left alone.
     pub fn write_sensor(&mut self, sensor: &Sensor) -> Result<()> {
         let entry: ProfileEntry = self.profile_entry(sensor.profile())?;
-        self.write_blocks(&entry, sensor, None)
+        self.write_blocks(&entry, sensor, None, None)
     }
 
     /// Sets the debounce time (0–10 ms) in every profile in use, as the
@@ -405,15 +414,22 @@ impl<T: Transport> KoneProAir<T> {
         Ok(())
     }
 
-    /// Reads the settings of all profiles in use.
+    /// Reads the settings and button assignments of all profiles in use.
     pub fn backup(&mut self) -> Result<Backup> {
         let info: Info = self.info()?;
         let table = self.profile_table()?;
         let mut profiles: Vec<ProfileBackup> = Vec::new();
         for (entry, number) in table.into_iter().zip(1u8..) {
             if profile_in_use(&entry) {
-                let settings: ProfileSettings = self.settings(Some(number))?;
-                profiles.push(ProfileBackup { entry, settings });
+                let (settings, buttons) = self.read_profile(Some(number), |mouse, target| {
+                    let settings: ProfileSettings = mouse.read_selected_settings(target)?;
+                    Ok((settings, mouse.read_selected_buttons(target)?))
+                })?;
+                profiles.push(ProfileBackup {
+                    entry,
+                    settings,
+                    buttons: Some(buttons),
+                });
             }
         }
         Ok(Backup {
@@ -425,8 +441,20 @@ impl<T: Transport> KoneProAir<T> {
     }
 
     /// Checks that `backup` fits the mouse: the firmware versions it records
-    /// must match the mouse's, and the dongle's when both are known.
+    /// must match the mouse's, and the dongle's when both are known. Button
+    /// assignments must belong to the profile they are stored with.
     pub fn check_backup(&mut self, backup: &Backup) -> Result<()> {
+        for profile in &backup.profiles {
+            if let Some(buttons) = &profile.buttons
+                && buttons.profile() != profile.settings.profile()
+            {
+                return Err(Error::InvalidBackup(format!(
+                    "the buttons of profile {} are stored with profile {}",
+                    buttons.profile(),
+                    profile.settings.profile()
+                )));
+            }
+        }
         let info: Info = self.info()?;
         let mismatch = |device: &str, saved: Firmware, now: Firmware| {
             Error::InvalidBackup(format!(
@@ -448,12 +476,18 @@ impl<T: Transport> KoneProAir<T> {
     }
 
     /// Writes a backup back to the mouse and activates its active profile,
-    /// after [`Self::check_backup`].
+    /// after [`Self::check_backup`]. Button assignments are written if the
+    /// backup has them (backups of konectl 0.2 and older do not).
     pub fn restore(&mut self, backup: &Backup) -> Result<()> {
         self.check_backup(backup)?;
         for profile in &backup.profiles {
             let settings: &ProfileSettings = &profile.settings;
-            self.write_blocks(&profile.entry, &settings.sensor, Some(&settings.lighting))?;
+            self.write_blocks(
+                &profile.entry,
+                &settings.sensor,
+                Some(&settings.lighting),
+                profile.buttons.as_ref(),
+            )?;
         }
         self.set_active_profile(backup.active_profile)
     }
@@ -468,27 +502,104 @@ impl<T: Transport> KoneProAir<T> {
         Ok(entry)
     }
 
-    /// Reads blocks 0 and 1 of the selected profile.
-    fn read_selected(&mut self) -> Result<ProfileSettings> {
-        let sensor = self.info()?.sensor;
-        let lighting = self.request(
+    /// Runs `read` with `profile` (default: the active one) selected for reads,
+    /// passing the profile number.
+    ///
+    /// Reading another profile selects it and selects the active profile
+    /// again afterwards, even if `read` failed, as the official software does.
+    fn read_profile<R>(
+        &mut self,
+        profile: Option<u8>,
+        read: impl FnOnce(&mut Self, u8) -> Result<R>,
+    ) -> Result<R> {
+        let active: u8 = self.active_profile()?;
+        let target: u8 = profile.unwrap_or(active);
+        if target == active {
+            return read(self, target);
+        }
+        self.profile_entry(target)?;
+        if let Err(error) = self.command(&protocol::select_profile(target), "profile selection") {
+            // The mouse may have selected it with only the answer lost.
+            let _ = self.command(&protocol::select_profile(active), "profile selection");
+            return Err(error);
+        }
+        let value: Result<R> = read(self, target);
+        let restored: Result<()> =
+            self.command(&protocol::select_profile(active), "profile selection");
+        let value: R = value?;
+        restored?;
+        Ok(value)
+    }
+
+    /// Reads block 0 of the selected profile, which must be `profile`.
+    fn read_selected_sensor(&mut self, profile: u8) -> Result<Sensor> {
+        let sensor: Sensor = self.info()?.sensor;
+        if sensor.profile() != profile {
+            return Err(Error::VerifyFailed("profile selection"));
+        }
+        Ok(sensor)
+    }
+
+    /// Reads block 1 of the selected profile.
+    fn read_selected_lighting(&mut self) -> Result<Lighting> {
+        self.request(
             &protocol::query_lighting(),
             "lighting query",
             protocol::parse_lighting,
-        )?;
+        )
+    }
+
+    /// Reads blocks 0 and 1 of the selected profile, which must be `profile`.
+    fn read_selected_settings(&mut self, profile: u8) -> Result<ProfileSettings> {
+        let sensor: Sensor = self.read_selected_sensor(profile)?;
+        let lighting: Lighting = self.read_selected_lighting()?;
         Ok(ProfileSettings { sensor, lighting })
     }
 
-    /// Writes the table entry, block 0 and (if given) block 1 of the profile
-    /// named in `sensor`, then reads them back to check them.
+    /// Reads blocks 2, 3 and 4 of the selected profile, `profile`.
+    fn read_selected_buttons(&mut self, profile: u8) -> Result<Buttons> {
+        let functions = self.request(
+            &protocol::query_button_functions(),
+            "button functions query",
+            protocol::parse_button_functions,
+        )?;
+        let standard = self.request(
+            &protocol::query_button_entries(Layer::Standard),
+            "button query",
+            |reply| protocol::parse_button_entries(reply, Layer::Standard),
+        )?;
+        let easy_shift = self.request(
+            &protocol::query_button_entries(Layer::EasyShift),
+            "Easy-Shift button query",
+            |reply| protocol::parse_button_entries(reply, Layer::EasyShift),
+        )?;
+        Ok(Buttons::from_blocks(
+            profile, functions, standard, easy_shift,
+        ))
+    }
+
+    /// Writes the table entry, block 0 and (if given) block 1 and blocks 2–4
+    /// of the profile named in `sensor`, then reads them back to check them.
+    ///
+    /// Block 0 comes first: the mouse writes blocks 1–4 into the profile named
+    /// in the last block 0 it received (the table entry does not select it).
     fn write_blocks(
         &mut self,
         entry: &ProfileEntry,
         sensor: &Sensor,
         lighting: Option<&Lighting>,
+        buttons: Option<&Buttons>,
     ) -> Result<()> {
         let profile: u8 = sensor.profile();
         profile_index(profile)?;
+        if let Some(buttons) = buttons
+            && buttons.profile() != profile
+        {
+            return Err(Error::InvalidValue(format!(
+                "the buttons of profile {} cannot be written to profile {profile}",
+                buttons.profile()
+            )));
+        }
         self.command(
             &protocol::write_profile_entry(profile, entry),
             "profile table write",
@@ -497,22 +608,43 @@ impl<T: Transport> KoneProAir<T> {
         if let Some(lighting) = lighting {
             self.command(&protocol::write_lighting(lighting), "lighting write")?;
         }
+        if let Some(buttons) = buttons {
+            for report in protocol::write_buttons(buttons) {
+                self.command(&report, "button write")?;
+            }
+        }
 
-        let stored: ProfileSettings = self.settings(Some(profile))?;
-        if stored.sensor.bytes() != sensor.write_bytes() {
+        // Read back exactly the blocks that were written.
+        let (stored_sensor, stored_lighting, stored_buttons) =
+            self.read_profile(Some(profile), |mouse, target| {
+                let sensor: Sensor = mouse.read_selected_sensor(target)?;
+                let lighting: Option<Lighting> = lighting
+                    .map(|_| mouse.read_selected_lighting())
+                    .transpose()?;
+                let buttons: Option<Buttons> = buttons
+                    .map(|_| mouse.read_selected_buttons(target))
+                    .transpose()?;
+                Ok((sensor, lighting, buttons))
+            })?;
+        if stored_sensor.bytes() != sensor.write_bytes() {
             return Err(Error::VerifyFailed("sensor settings"));
         }
-        if let Some(lighting) = lighting {
+        if let (Some(lighting), Some(stored)) = (lighting, stored_lighting) {
             // With the AIMO effect the mouse reports what it currently shows
             // instead of the saved values, so only the effect can be compared.
             let lighting_stored: bool = if lighting.effect() == Effect::Aimo {
-                stored.lighting.effect() == Effect::Aimo
+                stored.effect() == Effect::Aimo
             } else {
-                stored.lighting == *lighting
+                stored == *lighting
             };
             if !lighting_stored {
                 return Err(Error::VerifyFailed("lighting settings"));
             }
+        }
+        if let (Some(buttons), Some(stored)) = (buttons, stored_buttons)
+            && stored != *buttons
+        {
+            return Err(Error::VerifyFailed("buttons"));
         }
         Ok(())
     }
@@ -643,9 +775,12 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
+    use crate::buttons::tests::start_buttons;
+    use crate::buttons::{ButtonAction, MouseFunction};
     use crate::protocol::report_with_prefix;
     use crate::protocol::tests::{
-        CABLE_INFO_REPLY, INFO_REPLY, LIGHTING_REPLY, PROFILE_TABLE_REPLY,
+        BUTTON_FUNCTIONS_REPLY, BUTTONS_REPLY, CABLE_INFO_REPLY, EASY_SHIFT_BUTTONS_REPLY,
+        INFO_REPLY, LIGHTING_REPLY, PROFILE_TABLE_REPLY,
     };
     use crate::settings::{Lighting, Sensor};
 
@@ -854,6 +989,314 @@ mod tests {
         assert_eq!(written[5], protocol::select_profile(1));
     }
 
+    /// Answers to the three block reads of `buttons`.
+    fn button_replies(buttons: &Buttons) -> Vec<Vec<Report>> {
+        let reply = |prefix: [u8; 4], bytes: &[u8]| {
+            let mut reply: Report = report_with_prefix(&prefix);
+            reply[4..4 + bytes.len()].copy_from_slice(bytes);
+            reply
+        };
+        let [functions, standard, easy_shift] = protocol::write_buttons(buttons);
+        vec![
+            vec![reply([0x90, 0x02, 0x1c, 0x00], &functions[4..32])],
+            vec![reply([0x90, 0x04, 0x18, 0x00], &standard[4..28])],
+            vec![reply([0x90, 0x05, 0x18, 0x00], &easy_shift[4..28])],
+        ]
+    }
+
+    fn button_queries() -> [Report; 3] {
+        [
+            protocol::query_button_functions(),
+            protocol::query_button_entries(Layer::Standard),
+            protocol::query_button_entries(Layer::EasyShift),
+        ]
+    }
+
+    #[test]
+    fn buttons_are_read_from_blocks_2_to_4() {
+        let mut mouse = connect(vec![
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![report_with_prefix(&BUTTON_FUNCTIONS_REPLY)],
+            vec![report_with_prefix(&BUTTONS_REPLY)],
+            vec![report_with_prefix(&EASY_SHIFT_BUTTONS_REPLY)],
+        ]);
+        assert_eq!(mouse.buttons(None).expect("buttons"), start_buttons());
+        let written: &[Report] = &mouse.transport.written[1..];
+        assert_eq!(
+            written[..2],
+            [protocol::query_info(), protocol::query_info()]
+        );
+        assert_eq!(written[2..], button_queries());
+    }
+
+    /// Replies for writing buttons to profile 1 (active) with the start
+    /// settings, after which the mouse reports `stored` buttons.
+    fn write_button_batches(stored: &Buttons) -> Vec<Vec<Report>> {
+        let settings = start_settings();
+        let stored_sensor = Sensor::from_bytes(settings.sensor.write_bytes());
+        let mut batches = vec![
+            // table entry, then block 0 as read
+            vec![report_with_prefix(&PROFILE_TABLE_REPLY)],
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![report_with_prefix(&INFO_REPLY)],
+            // entry, block 0, blocks 2–4
+            vec![accepted(0x11)],
+            vec![accepted(0x50)],
+            vec![accepted(0x50)],
+            vec![accepted(0x50)],
+            vec![accepted(0x50)],
+            // read back: block 0 and blocks 2–4
+            vec![info_reply(&stored_sensor)],
+            vec![info_reply(&stored_sensor)],
+        ];
+        batches.extend(button_replies(stored));
+        batches
+    }
+
+    #[test]
+    fn write_buttons_writes_block_0_first() {
+        let mut buttons = start_buttons();
+        buttons
+            .set_action(7, Layer::Standard, ButtonAction::Mouse(MouseFunction::Back))
+            .expect("allowed");
+        let mut mouse = connect(write_button_batches(&buttons));
+        mouse.write_buttons(&buttons).expect("write");
+
+        let written: &[Report] = &mouse.transport.written[1..];
+        assert_eq!(written.len(), 13);
+        assert_eq!(written[0], protocol::query_profile_table());
+        assert_eq!(
+            written[3],
+            report_with_prefix(&[0x10, 0x11, 0x06, 0x00, 0x01, 0x01, 0x64])
+        );
+        // Block 0 as read (it names the profile the following blocks go to),
+        // then blocks 2–4; block 1 is neither written nor read.
+        assert_eq!(written[4], protocol::write_sensor(&start_settings().sensor));
+        assert_eq!(written[5..8], protocol::write_buttons(&buttons));
+        // Button 7 is slot 4 in block 3: browser back (capture 56).
+        assert_eq!(written[6][4 + 9..4 + 12], [0x00, 0x04, 0x00]);
+        assert!(written.iter().all(|report| {
+            report[..4] != [0x10, 0x50, 0x0b, 0x01] && *report != protocol::query_lighting()
+        }));
+        assert_eq!(written[10..], button_queries());
+    }
+
+    #[test]
+    fn write_buttons_to_another_profile_writes_its_block_0() {
+        // Profile 1 is active; the buttons belong to profile 2.
+        let start = start_buttons();
+        let buttons = Buttons::from_blocks(
+            2,
+            *start.functions(),
+            *start.entries(Layer::Standard),
+            *start.entries(Layer::EasyShift),
+        );
+        let mut bytes = start_settings().sensor.bytes();
+        bytes[0] = 2;
+        let sensor_2 = Sensor::from_bytes(bytes);
+        let stored_2 = Sensor::from_bytes(sensor_2.write_bytes());
+        let table = report_with_prefix(&PROFILE_TABLE_REPLY);
+        let mut batches = vec![
+            vec![table],
+            // block 0 of profile 2, selected for the read
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![table],
+            vec![accepted(0x13)],
+            vec![info_reply(&sensor_2)],
+            vec![accepted(0x13)],
+            // entry, block 0, blocks 2–4
+            vec![accepted(0x11)],
+            vec![accepted(0x50)],
+            vec![accepted(0x50)],
+            vec![accepted(0x50)],
+            vec![accepted(0x50)],
+            // read back, selected again
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![table],
+            vec![accepted(0x13)],
+            vec![info_reply(&stored_2)],
+        ];
+        batches.extend(button_replies(&buttons));
+        batches.push(vec![accepted(0x13)]);
+        let mut mouse = connect(batches);
+        mouse.write_buttons(&buttons).expect("write");
+
+        let written: &[Report] = &mouse.transport.written[1..];
+        assert_eq!(written[6][..5], [0x10, 0x11, 0x06, 0x00, 0x02]);
+        // Block 0 of profile 2 comes before the button blocks.
+        assert_eq!(written[7], protocol::write_sensor(&sensor_2));
+        assert_eq!(written[7][4], 2);
+        assert_eq!(written[8..11], protocol::write_buttons(&buttons));
+        assert_eq!(written.last(), Some(&protocol::select_profile(1)));
+    }
+
+    #[test]
+    fn buttons_that_do_not_read_back_fail() {
+        let mut buttons = start_buttons();
+        buttons
+            .set_action(7, Layer::Standard, ButtonAction::Disabled)
+            .expect("allowed");
+        let mut mouse = connect(write_button_batches(&start_buttons()));
+        assert!(matches!(
+            mouse.write_buttons(&buttons),
+            Err(Error::VerifyFailed("buttons"))
+        ));
+    }
+
+    #[test]
+    fn buttons_of_an_unselected_profile_are_refused() {
+        // The info answer after the selection still names profile 1.
+        let mut mouse = connect(vec![
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![report_with_prefix(&PROFILE_TABLE_REPLY)],
+            vec![accepted(0x13)],
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![accepted(0x13)],
+        ]);
+        assert!(matches!(
+            mouse.buttons(Some(2)),
+            Err(Error::VerifyFailed("profile selection"))
+        ));
+        // The active profile is selected again.
+        assert_eq!(
+            mouse.transport.written.last(),
+            Some(&protocol::select_profile(1))
+        );
+    }
+
+    /// Profile 1 of the start state, as a one-profile backup.
+    fn start_backup() -> Backup {
+        Backup {
+            firmware: firmware(4, 32),
+            dongle_firmware: firmware(4, 19),
+            active_profile: 1,
+            profiles: vec![ProfileBackup {
+                entry: [0x01, 0x64, 0x00, 0x00, 0x00],
+                settings: start_settings(),
+                buttons: Some(start_buttons()),
+            }],
+        }
+    }
+
+    #[test]
+    fn backup_includes_the_buttons() {
+        let settings = start_settings();
+        let mut batches = vec![
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![single_profile_table()],
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![lighting_reply(&settings.lighting)],
+        ];
+        batches.extend(button_replies(&start_buttons()));
+        let mut mouse = connect(batches);
+        assert_eq!(mouse.backup().expect("backup"), start_backup());
+    }
+
+    #[test]
+    fn restore_writes_the_buttons() {
+        let backup = start_backup();
+        let settings = start_settings();
+        let stored_sensor = Sensor::from_bytes(settings.sensor.write_bytes());
+        let mut batches = vec![
+            // check_backup
+            vec![report_with_prefix(&INFO_REPLY)],
+            // entry and blocks 0–4 in the official order
+            vec![accepted(0x11)],
+            vec![accepted(0x50)],
+            vec![accepted(0x50)],
+            vec![accepted(0x50)],
+            vec![accepted(0x50)],
+            vec![accepted(0x50)],
+            // read back
+            vec![info_reply(&stored_sensor)],
+            vec![info_reply(&stored_sensor)],
+            vec![lighting_reply(&settings.lighting)],
+        ];
+        batches.extend(button_replies(&start_buttons()));
+        // activation of the backup's active profile
+        batches.extend([
+            vec![single_profile_table()],
+            vec![accepted(0x03)],
+            vec![report_with_prefix(&INFO_REPLY)],
+        ]);
+        let mut mouse = connect(batches);
+        mouse.restore(&backup).expect("restore");
+        let written: &[Report] = &mouse.transport.written[1..];
+        assert_eq!(written[2], protocol::write_sensor(&settings.sensor));
+        assert_eq!(written[3], protocol::write_lighting(&settings.lighting));
+        assert_eq!(written[4..7], protocol::write_buttons(&start_buttons()));
+        assert_eq!(written.last(), Some(&protocol::query_info()));
+    }
+
+    #[test]
+    fn restore_without_buttons_leaves_them_alone() {
+        let mut backup = start_backup();
+        backup.profiles[0].buttons = None;
+        let settings = start_settings();
+        let stored_sensor = Sensor::from_bytes(settings.sensor.write_bytes());
+        let mut mouse = connect(vec![
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![accepted(0x11)],
+            vec![accepted(0x50)],
+            vec![accepted(0x50)],
+            vec![info_reply(&stored_sensor)],
+            vec![info_reply(&stored_sensor)],
+            vec![lighting_reply(&settings.lighting)],
+            vec![single_profile_table()],
+            vec![accepted(0x03)],
+            vec![report_with_prefix(&INFO_REPLY)],
+        ]);
+        mouse.restore(&backup).expect("restore");
+        let button_requests: usize = mouse.transport.written[1..]
+            .iter()
+            .filter(|report| {
+                (report[..2] == [0x10, 0x50] && report[3] >= 2) || button_queries().contains(report)
+            })
+            .count();
+        assert_eq!(button_requests, 0);
+    }
+
+    #[test]
+    fn restore_refuses_buttons_of_another_profile() {
+        let mut backup = start_backup();
+        let start = start_buttons();
+        backup.profiles[0].buttons = Some(Buttons::from_blocks(
+            2,
+            *start.functions(),
+            *start.entries(Layer::Standard),
+            *start.entries(Layer::EasyShift),
+        ));
+        let mut mouse = connect(vec![]);
+        assert!(matches!(
+            mouse.restore(&backup),
+            Err(Error::InvalidBackup(_))
+        ));
+        // Nothing was sent.
+        assert_eq!(mouse.transport.written.len(), 1);
+    }
+
+    #[test]
+    fn failed_selection_selects_the_active_profile_again() {
+        let mut mouse = connect(vec![
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![report_with_prefix(&PROFILE_TABLE_REPLY)],
+            vec![report_with_prefix(&[
+                0x10, 0x13, 0x03, 0x00, 0xec, 0xfa, 0x05,
+            ])],
+            vec![accepted(0x13)],
+        ]);
+        assert!(matches!(
+            mouse.buttons(Some(2)),
+            Err(Error::Rejected { .. })
+        ));
+        assert_eq!(
+            mouse.transport.written.last(),
+            Some(&protocol::select_profile(1))
+        );
+    }
+
     #[test]
     fn late_init_reply_is_skipped_by_the_info_query() {
         let late_init: Report = init_reply();
@@ -870,7 +1313,8 @@ mod tests {
         let mut mouse = connect(batches);
         mouse.write_sensor(&settings.sensor).expect("write");
         let written: &[Report] = &mouse.transport.written[1..];
-        assert_eq!(written.len(), 6);
+        // Table, entry, block 0, then block 0 read back (no lighting read).
+        assert_eq!(written.len(), 5);
         assert_eq!(written[2], protocol::write_sensor(&settings.sensor));
         assert!(
             written
@@ -955,7 +1399,7 @@ mod tests {
         mouse.set_debounce(3).expect("set debounce");
 
         let written: &[Report] = &mouse.transport.written[1..];
-        assert_eq!(written.len(), 10);
+        assert_eq!(written.len(), 9);
         assert_eq!(written[6], protocol::write_sensor(&changed));
         assert_eq!(written[6][4 + 19], 3);
     }
@@ -988,21 +1432,20 @@ mod tests {
             vec![lighting],
             vec![accepted(0x13)],
         ]);
-        // Write profile 2, then read it back the same way.
+        // Write profile 2, then read its block 0 back the same way.
         batches.extend([vec![table], vec![accepted(0x11)], vec![accepted(0x50)]]);
         batches.extend([
             vec![info_reply(&profile_1)],
             vec![table],
             vec![accepted(0x13)],
             vec![info_reply(&written_2)],
-            vec![lighting],
             vec![accepted(0x13)],
         ]);
         let mut mouse = connect(batches);
         mouse.set_debounce(3).expect("set debounce");
 
         let written: &[Report] = &mouse.transport.written[1..];
-        assert_eq!(written.len(), 19);
+        assert_eq!(written.len(), 18);
         assert_eq!(written[6], protocol::select_profile(2));
         assert_eq!(written[9], protocol::select_profile(1));
         assert_eq!(written[11][..5], [0x10, 0x11, 0x06, 0x00, 0x02]);
