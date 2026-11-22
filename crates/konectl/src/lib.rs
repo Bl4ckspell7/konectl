@@ -3,7 +3,7 @@
 //! Not affiliated with ROCCAT or Turtle Beach.
 //!
 //! ```no_run
-//! use konectl::{Manager, Rgb};
+//! use konectl::{Layer, Manager, Rgb};
 //!
 //! let manager = Manager::new()?;
 //! let mut mouse = manager.open_first()?;
@@ -14,10 +14,16 @@
 //! settings.sensor.set_dpi(2, Some(900))?;
 //! settings.lighting.set_left(Rgb::new(255, 0, 0));
 //! mouse.write_settings(&settings)?;
+//!
+//! // Button assignments: the rear side button becomes "browser back".
+//! let mut buttons = mouse.buttons(None)?;
+//! buttons.set_action(7, Layer::Standard, "back".parse()?)?;
+//! mouse.write_buttons(&buttons)?;
 //! # Ok::<(), konectl::Error>(())
 //! ```
 
 mod backup;
+pub mod buttons;
 mod color;
 mod device;
 mod error;
@@ -26,6 +32,7 @@ pub mod settings;
 mod transport;
 
 pub use backup::{Backup, ProfileBackup};
+pub use buttons::{ButtonAction, Buttons, Layer};
 pub use color::{ParseRgbError, Rgb};
 pub use device::{ConnectionMode, DeviceInfo, KoneProAir, Manager};
 pub use error::{Error, Result};
