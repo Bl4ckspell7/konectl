@@ -27,26 +27,37 @@ Tested with firmware 4.19, over the wireless dongle and the USB cable. See
 ## Layout
 
 - `crates/konectl`: the library (`Manager`, `KoneProAir`, `settings`, `protocol`)
-- `tools/re`: Windows VM and USB capture scripts used to decode the protocol
 - `crates/konectl-cli`: the `konectl` command-line tool
+- `tools/re`: Windows VM and USB capture scripts used to decode the protocol
 
-## Build
+## Install
 
-Requires Rust 1.88 or newer and libudev (`systemd-libs` on Arch).
+Building needs Rust 1.88 or newer, `pkg-config` and the libudev development
+files: `systemd-libs` and `pkgconf` on Arch, `libudev-dev` and `pkg-config` on
+Debian and Ubuntu, `systemd-devel` and `pkgconf` on Fedora.
 
 ```sh
-cargo build --release
+cargo install konectl-cli                 # installs the konectl binary into ~/.cargo/bin
+cargo install --path crates/konectl-cli   # or from a clone of this repository
 ```
+
+To use the library in your own project: `cargo add konectl`
+([API documentation](https://docs.rs/konectl)).
 
 ## Permissions
 
-By default, only root can open the mouse's `/dev/hidraw*` nodes. Install the udev rule to
-give the logged-in user access to the configuration interface only:
+By default, only root can open the mouse's `/dev/hidraw*` nodes. The udev rule
+gives the logged-in user access to the configuration interface only (not to
+the mouse input itself). `cargo install` does not install it; take it from the
+repository, at the tag of the installed version:
 
 ```sh
-sudo install -m 0644 udev/70-konectl.rules /etc/udev/rules.d/
+curl -fsSLO https://raw.githubusercontent.com/Bl4ckspell7/konectl/v0.1.0/udev/70-konectl.rules
+sudo install -m 0644 70-konectl.rules /etc/udev/rules.d/
 sudo udevadm control --reload && sudo udevadm trigger
 ```
+
+In a clone of the repository, install `udev/70-konectl.rules` the same way.
 
 ## Usage
 
