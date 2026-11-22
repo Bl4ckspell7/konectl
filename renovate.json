@@ -1,0 +1,57 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "docker:pinDigests"],
+  "enabledManagers": ["cargo", "github-actions", "docker-compose", "custom.regex"],
+  "minimumReleaseAge": "5 days",
+  "minimumReleaseAgeBehaviour": "timestamp-optional",
+  "dependencyDashboard": true,
+  "prConcurrentLimit": 0,
+  "prHourlyLimit": 0,
+  "lockFileMaintenance": {
+    "description": "Refresh Cargo.lock once a week, all of Monday (UTC). The preset default 'before 4am on monday' is never hit: the scheduled workflow runs in the afternoon and starts hours late.",
+    "enabled": true,
+    "schedule": ["* * * * 1"]
+  },
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^\\.github/workflows/renovate\\.yml$/"],
+      "matchStrings": [
+        "#\\s*renovate:\\s*datasource=(?<datasource>\\S+)\\s+depName=(?<depName>\\S+)\\s*\\n\\s*renovate-version:\\s*(?<currentValue>[^\\s@]+)(@(?<currentDigest>sha256:[a-f0-9]+))?"
+      ]
+    },
+    {
+      "customType": "regex",
+      "description": "git-cliff, installed with uv in the release workflow.",
+      "managerFilePatterns": ["/^\\.github/workflows/release\\.yml$/"],
+      "matchStrings": ["git-cliff==(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "datasourceTemplate": "pypi",
+      "depNameTemplate": "git-cliff"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "Digest updates once a week, all of Monday (UTC). The scheduled workflow starts hours late, so a narrow window was never hit.",
+      "matchUpdateTypes": ["digest"],
+      "schedule": ["* * * * 1"]
+    },
+    {
+      "description": "Renovate releases several times a day, so updating it opened a PR almost daily. Once a month, all of the 1st (UTC), as one PR.",
+      "matchPackageNames": [
+        "ghcr.io/renovatebot/renovate",
+        "renovatebot/github-action"
+      ],
+      "groupName": "renovate",
+      "schedule": ["* * 1 * *"]
+    },
+    {
+      "description": "The Windows VM for protocol captures (tools/re) is rarely used; once a month, all of the 1st (UTC).",
+      "matchManagers": ["docker-compose"],
+      "schedule": ["* * 1 * *"]
+    },
+    {
+      "matchDepNames": ["docker.io/library/archlinux"],
+      "versioning": "regex:^(?<compatibility>base)-(?<major>\\d{8})\\.(?<minor>\\d+)\\.(?<patch>\\d+)$"
+    }
+  ]
+}

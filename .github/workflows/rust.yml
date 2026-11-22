@@ -1,0 +1,98 @@
+name: Rust
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_HOME: /usr/local/cargo
+
+jobs:
+  check:
+    name: Format, lint and test
+    runs-on: ubuntu-latest
+    container: docker.io/library/archlinux:base-20261108.0.623074@sha256:d4594bb2300cba11f41c2f27923eb56f63d9988909c402f9c95517d1e362c899
+
+    steps:
+      - name: Cache pacman packages
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /var/cache/pacman/pkg
+          key: pacman-${{ github.run_id }}
+          restore-keys: pacman-
+
+      - name: Install dependencies
+        run: |
+          pacman-key --init
+          pacman -Syu --noconfirm git pkgconf rust shellcheck systemd-libs
+          # Keep only the installed package versions, so the cache does not grow.
+          pacman -Sc --noconfirm
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Get Rust version
+        id: rustc
+        run: echo "hash=$(rustc -V | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            /usr/local/cargo/registry
+            /usr/local/cargo/git
+            target
+          # A new rustc cannot reuse old build output, so it is part of the key.
+          key: ${{ runner.os }}-cargo-${{ steps.rustc.outputs.hash }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ steps.rustc.outputs.hash }}-
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace --locked
+
+      - name: Check shell scripts
+        run: shellcheck tools/re/*.sh scripts/release/*.sh
+
+  msrv:
+    name: Minimum supported Rust version
+    runs-on: ubuntu-latest
+    container: docker.io/library/archlinux:base-20261108.0.623074@sha256:d4594bb2300cba11f41c2f27923eb56f63d9988909c402f9c95517d1e362c899
+
+    steps:
+      - name: Install dependencies
+        run: |
+          pacman-key --init
+          pacman -Syu --noconfirm git pkgconf rustup systemd-libs
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the minimum Rust version
+        run: |
+          set -euo pipefail
+          msrv="$(sed -nE 's/^rust-version = "([^"]+)"/\1/p' Cargo.toml)"
+          rustup toolchain install "$msrv" --profile minimal
+          rustup default "$msrv"
+
+      - name: Check the workspace
+        run: cargo check --workspace --all-targets --locked
