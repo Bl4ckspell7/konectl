@@ -5,10 +5,9 @@
 #       Print the next version (no leading "v"). Read-only.
 #
 #   bump.sh apply <version>
-#       Set the version of both crates (Cargo.toml, Cargo.lock), point the
-#       README's udev rule link at the new tag, (re)generate CHANGELOG.md and
-#       write this release's notes to $RELEASE_NOTES (default
-#       /tmp/release-notes.md). Mutates the tree.
+#       Set the version of both crates (Cargo.toml, Cargo.lock),
+#       (re)generate CHANGELOG.md and write this release's notes to
+#       $RELEASE_NOTES (default /tmp/release-notes.md). Mutates the tree.
 #
 # "auto" derives the bump from Conventional Commits via git-cliff. The very
 # first release (no tags yet) uses the current Cargo.toml version as-is.
@@ -19,7 +18,6 @@ cd "$REPO_ROOT"
 
 CARGO_TOML="Cargo.toml"
 CARGO_LOCK="Cargo.lock"
-README="README.md"
 RELEASE_NOTES="${RELEASE_NOTES:-/tmp/release-notes.md}"
 # Workspace packages; all share the version from [workspace.package].
 CRATES=("konectl" "konectl-cli")
@@ -94,9 +92,6 @@ apply() {
         sed -i '/^name = "'"$crate"'"$/{n;s/^version = "[^"]*"/version = "'"$v"'"/}' "$CARGO_LOCK"
     done
 
-    # README: the udev rule is downloaded from the release tag.
-    sed -i -E 's#(/konectl/)v[0-9]+\.[0-9]+\.[0-9]+(/udev/)#\1v'"$v"'\2#' "$README"
-
     check_applied "$v"
 
     # Changelog + this release's notes (Conventional Commits via git-cliff).
@@ -119,7 +114,6 @@ check_applied() {
         grep -A1 -x 'name = "'"$crate"'"' "$CARGO_LOCK" | grep -qx 'version = "'"$v"'"' ||
             die "$CARGO_LOCK: $crate version not updated"
     done
-    grep -q "/konectl/v$v/udev/" "$README" || die "$README: udev rule link not updated"
 }
 
 case "${1:-}" in
