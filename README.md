@@ -32,9 +32,10 @@ Tested with firmware 4.19, over the wireless dongle and the USB cable. See
 
 ## Install
 
-Building needs Rust 1.88 or newer, `pkg-config` and the libudev development
-files: `systemd-libs` and `pkgconf` on Arch, `libudev-dev` and `pkg-config` on
-Debian and Ubuntu, `systemd-devel` and `pkgconf` on Fedora.
+Building needs Rust 1.88 or newer, a C compiler, `pkg-config` and the libudev
+development files: `gcc`, `pkgconf` and `systemd-libs` on Arch;
+`build-essential`, `pkg-config` and `libudev-dev` on Debian and Ubuntu; `gcc`,
+`pkgconf` and `systemd-devel` on Fedora.
 
 ```sh
 cargo install konectl-cli                 # installs the konectl binary into ~/.cargo/bin

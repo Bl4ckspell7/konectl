@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - Rust 1.88 or newer (edition 2024)
-- `pkg-config` and the libudev development files (see [Install](README.md#install))
+- a C compiler, `pkg-config` and the libudev development files (see [Install](README.md#install))
 - For protocol work: [docs/reverse-engineering.md](docs/reverse-engineering.md)
 
 ## Checks

@@ -80,7 +80,9 @@ jobs:
       - name: Install dependencies
         run: |
           pacman-key --init
-          pacman -Syu --noconfirm git pkgconf rustup systemd-libs
+          # gcc: hidapi compiles C code and rustup's toolchains link with it (Arch's rust
+          # package pulls it in itself).
+          pacman -Syu --noconfirm gcc git pkgconf rustup systemd-libs
 
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
