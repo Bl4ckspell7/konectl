@@ -1,1 +1,3 @@
 /target
+# Raw USB captures: may contain device identifiers, never commit them.
+/tools/re/captures/

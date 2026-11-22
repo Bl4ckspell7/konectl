@@ -1,0 +1,49 @@
+# Windows VM running the official configuration software, so its USB traffic
+# with the mouse can be captured on the host. See docs/reverse-engineering.md.
+#
+#   tools/re/fetch-iso.sh                            # download the Windows ISO first
+#   docker compose -f tools/re/compose.yaml up -d     # web viewer: http://127.0.0.1:8006
+#   docker compose -f tools/re/compose.yaml down      # stop (keeps the VM disk)
+#   docker compose -f tools/re/compose.yaml down -v   # stop and delete the VM disk
+#
+# The Windows install takes a while; to keep the mouse on the host meanwhile,
+# start without USB passthrough and recreate the container once Windows is up:
+#   KONECTL_RE_ARGUMENTS= docker compose -f tools/re/compose.yaml up -d
+#   docker compose -f tools/re/compose.yaml up -d --force-recreate
+name: konectl-re
+
+services:
+  windows:
+    image: docker.io/dockurr/windows:6.06@sha256:16fd7c39a3e48bb946d29c59dc6015942e5b900a1fa5d7e5552053bfc48ee2ea
+    container_name: konectl-re-windows
+    environment:
+      VERSION: "11l" # Windows 11 LTSC; ignored while /custom.iso is mounted
+      RAM_SIZE: "4G"
+      CPU_CORES: "4"
+      DISK_SIZE: "40G"
+      # Hand the wireless dongle to the VM; the host loses the mouse while the VM runs.
+      # For the USB cable use productid=0x2c92 instead. KONECTL_RE_ARGUMENTS set to
+      # an empty string disables the passthrough.
+      ARGUMENTS: "${KONECTL_RE_ARGUMENTS--device usb-host,vendorid=0x1e7d,productid=0x2c8e}"
+    devices:
+      - /dev/kvm
+      - /dev/net/tun
+      - /dev/bus/usb
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "127.0.0.1:8006:8006" # web viewer, local only
+    volumes:
+      - windows-storage:/storage
+      # Installation ISO from tools/re/fetch-iso.sh (replaces dockur's own download).
+      - type: bind
+        source: ${KONECTL_RE_DIR:-${HOME}/.local/share/konectl-re}/win11-ltsc-eval.iso
+        target: /custom.iso
+        read_only: true
+        bind:
+          create_host_path: false
+    restart: "no"
+    stop_grace_period: 2m
+
+volumes:
+  windows-storage:
