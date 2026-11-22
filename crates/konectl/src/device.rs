@@ -18,10 +18,44 @@ use crate::transport::{HidTransport, Transport};
 
 /// How long a single read waits for a report.
 const READ_TIMEOUT_MS: i32 = 20;
+/// The official software reads the calibration state one second after
+/// starting the lift-off calibration.
+const CALIBRATION_START_DELAY: Duration = if cfg!(test) {
+    Duration::ZERO
+} else {
+    Duration::from_secs(1)
+};
+/// Quiet time before starting the calibration: its start is not acknowledged,
+/// so it cannot be sent again if the mouse drops it.
+const CALIBRATION_QUIET: Duration = if cfg!(test) {
+    Duration::ZERO
+} else {
+    Duration::from_millis(200)
+};
 /// How long a request waits for its answer.
-const REPLY_DEADLINE: Duration = Duration::from_millis(500);
+const REPLY_DEADLINE: Duration = if cfg!(test) {
+    Duration::from_millis(30)
+} else {
+    Duration::from_millis(500)
+};
 /// Silence after the last reply at which [`KoneProAir::raw`] stops collecting.
 const RAW_QUIET_PERIOD: Duration = Duration::from_millis(100);
+/// How often a request that gets no answer is sent again. The mouse
+/// sometimes drops a request that arrives right after a state change; these
+/// requests read or set an absolute value, so repeating them does no harm.
+/// The lift-off calibration commands are never repeated.
+const REQUEST_RETRIES: usize = 2;
+/// Pause after a write command before the next request. The mouse may drop a
+/// request that arrives within a few milliseconds of a profile switch or a
+/// block write (the official software leaves 60–90 ms).
+const WRITE_SETTLE: Duration = if cfg!(test) {
+    Duration::ZERO
+} else {
+    Duration::from_millis(40)
+};
+/// After a repeated request, how long to wait for a late duplicate answer to
+/// the first attempt, so it is not taken for the answer to the next request.
+const DUPLICATE_WAIT_MS: i32 = if cfg!(test) { 0 } else { 100 };
 /// Upper bound on replies collected by [`KoneProAir::raw`].
 const MAX_RAW_REPLIES: usize = 64;
 /// Upper bound on stale reports discarded before a request.
@@ -232,6 +266,70 @@ impl<T: Transport> KoneProAir<T> {
             .collect())
     }
 
+    /// Whether energy saving is on. One setting for all profiles.
+    pub fn energy_saving(&mut self) -> Result<bool> {
+        self.request(
+            &protocol::query_energy_saving(),
+            "energy saving query",
+            protocol::parse_energy_saving,
+        )?
+        .map_err(|raw| Error::InvalidValue(format!("unknown energy saving value {raw:#04x}")))
+    }
+
+    /// Turns energy saving on or off and checks that it reads back.
+    pub fn set_energy_saving(&mut self, enabled: bool) -> Result<()> {
+        self.command(&protocol::set_energy_saving(enabled), "energy saving write")?;
+        if self.energy_saving()? != enabled {
+            return Err(Error::VerifyFailed("energy saving"));
+        }
+        Ok(())
+    }
+
+    /// Starts the lift-off calibration. Move the mouse continuously on the
+    /// surface for about 10 seconds, then call
+    /// [`Self::finish_lift_off_calibration`] and set [`LiftOff::Custom`] to
+    /// use the measured distance.
+    ///
+    /// [`LiftOff::Custom`]: crate::LiftOff::Custom
+    pub fn start_lift_off_calibration(&mut self) -> Result<()> {
+        std::thread::sleep(CALIBRATION_QUIET);
+        self.discard_pending(0)?;
+        // The mouse does not acknowledge the start; like the official software,
+        // read the calibration state a second later instead.
+        self.transport
+            .write_report(&protocol::start_lift_off_calibration())?;
+        std::thread::sleep(CALIBRATION_START_DELAY);
+        self.request(
+            &protocol::query_lift_off_calibration(),
+            "lift-off calibration query",
+            protocol::parse_lift_off_calibration,
+        )?;
+        Ok(())
+    }
+
+    /// Ends the lift-off calibration and keeps the measured distance.
+    ///
+    /// Not repeated when unanswered: whether applying twice is harmless is
+    /// not known.
+    pub fn finish_lift_off_calibration(&mut self) -> Result<()> {
+        let report: Report = protocol::apply_lift_off_calibration();
+        self.exchange_with(
+            &report,
+            "lift-off calibration",
+            0,
+            |reply| match protocol::parse_status(reply, &report) {
+                Some(Status::Accepted) => Some(Ok(())),
+                Some(Status::Error(code)) => Some(Err(Error::Rejected {
+                    command: "lift-off calibration",
+                    code,
+                })),
+                None => None,
+            },
+        )?;
+        std::thread::sleep(WRITE_SETTLE);
+        Ok(())
+    }
+
     /// Makes `profile` (1–5) the active profile.
     pub fn set_active_profile(&mut self, profile: u8) -> Result<()> {
         self.profile_entry(profile)?;
@@ -283,8 +381,8 @@ impl<T: Transport> KoneProAir<T> {
         self.write_blocks(&entry, &settings.sensor, Some(&settings.lighting))
     }
 
-    /// Writes only block 0 ([`Sensor`]: polling rate, DPI, lift-off, angle
-    /// snapping, debounce) of the profile it
+    /// Writes only block 0 ([`Sensor`]: polling rate, DPI stages and AUTO
+    /// flags, lift-off, angle snapping, LED time-out, debounce) of the profile it
     /// belongs to, after the profile's table entry, and checks that it reads
     /// back unchanged. The saved lighting is left alone.
     pub fn write_sensor(&mut self, sensor: &Sensor) -> Result<()> {
@@ -469,24 +567,47 @@ impl<T: Transport> KoneProAir<T> {
     }
 
     /// Sends `report` and returns the outcome of the first reply `classify`
-    /// recognises (`Some`); other replies are skipped.
+    /// recognises (`Some`); other replies are skipped. A request that gets no
+    /// answer is sent again up to [`REQUEST_RETRIES`] times.
     fn exchange<R>(
         &mut self,
         report: &Report,
         what: &'static str,
         classify: impl Fn(&Report) -> Option<Result<R>>,
     ) -> Result<R> {
-        self.discard_pending(0)?;
-        self.transport.write_report(report)?;
-        self.await_reply(classify)?
-            .unwrap_or(Err(Error::Timeout(what)))
+        self.exchange_with(report, what, REQUEST_RETRIES, classify)
     }
 
-    /// Sends a write command and waits until the mouse accepts it.
+    /// [`Self::exchange`] with an explicit number of retries.
+    fn exchange_with<R>(
+        &mut self,
+        report: &Report,
+        what: &'static str,
+        retries: usize,
+        classify: impl Fn(&Report) -> Option<Result<R>>,
+    ) -> Result<R> {
+        for attempt in 0..=retries {
+            self.discard_pending(0)?;
+            self.transport.write_report(report)?;
+            if let Some(outcome) = self.await_reply(&classify)? {
+                if attempt > 0 {
+                    // The first attempt may still be answered late.
+                    self.discard_pending(DUPLICATE_WAIT_MS)?;
+                }
+                return outcome;
+            }
+        }
+        Err(Error::Timeout(what))
+    }
+
+    /// Sends a write command, waits until the mouse accepts it and gives the
+    /// mouse [`WRITE_SETTLE`] before the next request.
     fn command(&mut self, report: &Report, what: &'static str) -> Result<()> {
         self.request(report, what, |reply| {
             (protocol::parse_status(reply, report) == Some(Status::Accepted)).then_some(())
-        })
+        })?;
+        std::thread::sleep(WRITE_SETTLE);
+        Ok(())
     }
 
     /// Reads until `parse` accepts a report, skipping all others.
@@ -920,6 +1041,98 @@ mod tests {
     fn sleeping_mouse_is_not_reachable() {
         let mut mouse = connect(vec![vec![report_with_prefix(&[0x90, 0x00, 0x39, 0x00])]]);
         assert!(matches!(mouse.settings(None), Err(Error::NotReachable)));
+    }
+
+    #[test]
+    fn energy_saving_is_written_and_verified() {
+        let mut mouse = connect(vec![
+            vec![accepted(0x72)],
+            vec![report_with_prefix(&[0x90, 0x72, 0x01, 0x00, 0xaa])],
+        ]);
+        mouse.set_energy_saving(true).expect("set energy saving");
+        assert_eq!(
+            mouse.transport.written[1],
+            protocol::set_energy_saving(true)
+        );
+        assert_eq!(mouse.transport.written[2], protocol::query_energy_saving());
+    }
+
+    #[test]
+    fn energy_saving_that_does_not_read_back_fails() {
+        let mut mouse = connect(vec![
+            vec![accepted(0x72)],
+            vec![report_with_prefix(&[0x90, 0x72, 0x01, 0x00, 0x00])],
+        ]);
+        assert!(matches!(
+            mouse.set_energy_saving(true),
+            Err(Error::VerifyFailed("energy saving"))
+        ));
+    }
+
+    #[test]
+    fn lift_off_calibration_sequence() {
+        let mut mouse = connect(vec![
+            vec![],
+            vec![report_with_prefix(&[0x90, 0x08, 0x01, 0x00, 0x00])],
+            vec![accepted(0x15)],
+        ]);
+        mouse.start_lift_off_calibration().expect("start");
+        mouse.finish_lift_off_calibration().expect("finish");
+        assert_eq!(
+            mouse.transport.written[1..],
+            [
+                protocol::start_lift_off_calibration(),
+                protocol::query_lift_off_calibration(),
+                protocol::apply_lift_off_calibration()
+            ]
+        );
+    }
+
+    #[test]
+    fn unanswered_reads_are_sent_again() {
+        // The first info query is dropped, the second one is answered.
+        let mut mouse = connect(vec![vec![], vec![report_with_prefix(&INFO_REPLY)]]);
+        assert_eq!(mouse.info().expect("info").sensor.profile(), 1);
+        assert_eq!(
+            mouse.transport.written[1..],
+            [protocol::query_info(), protocol::query_info()]
+        );
+    }
+
+    #[test]
+    fn unanswered_writes_are_sent_again() {
+        // No answer at all: the write is sent 1 + REQUEST_RETRIES times.
+        let mut mouse = connect(vec![]);
+        assert!(matches!(
+            mouse.set_energy_saving(true),
+            Err(Error::Timeout("energy saving write"))
+        ));
+        assert_eq!(mouse.transport.written.len(), 1 + 1 + REQUEST_RETRIES);
+        // The second attempt is answered.
+        let mut mouse = connect(vec![
+            vec![],
+            vec![accepted(0x72)],
+            vec![report_with_prefix(&[0x90, 0x72, 0x01, 0x00, 0xaa])],
+        ]);
+        mouse.set_energy_saving(true).expect("set energy saving");
+        assert_eq!(
+            mouse.transport.written[1..],
+            [
+                protocol::set_energy_saving(true),
+                protocol::set_energy_saving(true),
+                protocol::query_energy_saving()
+            ]
+        );
+    }
+
+    #[test]
+    fn calibration_apply_is_not_sent_again() {
+        let mut mouse = connect(vec![]);
+        assert!(matches!(
+            mouse.finish_lift_off_calibration(),
+            Err(Error::Timeout("lift-off calibration"))
+        ));
+        assert_eq!(mouse.transport.written.len(), 2);
     }
 
     #[test]
