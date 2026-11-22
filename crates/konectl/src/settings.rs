@@ -28,6 +28,8 @@ pub const SPEED_MIN: u8 = 1;
 pub const SPEED_MAX: u8 = 11;
 /// Longest debounce time the official software offers, in milliseconds.
 pub const DEBOUNCE_MAX_MS: u8 = 10;
+/// Highest colour intensity, in percent.
+pub const INTENSITY_MAX: u8 = 100;
 
 /// Fails unless `ms` is a debounce time the official software offers (0–10).
 pub(crate) fn check_debounce_ms(ms: u8) -> Result<()> {
@@ -192,7 +194,10 @@ impl FromStr for PollingRate {
 pub enum LiftOff {
     VeryLow,
     Low,
-    /// A value konectl does not know, e.g. from the official software's calibration.
+    /// The distance measured by the lift-off calibration (see
+    /// [`KoneProAir::start_lift_off_calibration`](crate::KoneProAir::start_lift_off_calibration)).
+    Custom,
+    /// A value konectl does not know.
     Other(u8),
 }
 
@@ -201,12 +206,13 @@ impl LiftOff {
         match self {
             Self::VeryLow => 0x06,
             Self::Low => 0x07,
+            Self::Custom => 0x08,
             Self::Other(code) => code,
         }
     }
 
     fn from_code(code: u8) -> Self {
-        [Self::VeryLow, Self::Low]
+        [Self::VeryLow, Self::Low, Self::Custom]
             .into_iter()
             .find(|distance| distance.code() == code)
             .unwrap_or(Self::Other(code))
@@ -218,6 +224,7 @@ impl fmt::Display for LiftOff {
         match self {
             Self::VeryLow => f.pad("very low"),
             Self::Low => f.pad("low"),
+            Self::Custom => f.pad("custom (calibrated)"),
             Self::Other(code) => write!(f, "unknown ({code:#04x})"),
         }
     }
@@ -226,20 +233,52 @@ impl fmt::Display for LiftOff {
 impl FromStr for LiftOff {
     type Err = Error;
 
-    /// Parses `very-low` or `low`.
+    /// Parses `very-low`, `low` or `custom`.
     fn from_str(s: &str) -> Result<Self> {
         match s {
             "very-low" => Ok(Self::VeryLow),
             "low" => Ok(Self::Low),
+            "custom" => Ok(Self::Custom),
             _ => Err(Error::InvalidValue(format!(
-                "invalid lift-off distance {s:?}: use very-low or low"
+                "invalid lift-off distance {s:?}: use very-low, low or custom"
             ))),
         }
     }
 }
 
-/// Settings block 0: polling rate, DPI stages, lift-off, angle snapping and
-/// debounce time of one profile.
+/// What the LEDs do when the mouse has not been used for a while.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedTimeout {
+    /// The LEDs keep their effect.
+    Never,
+    /// After `minutes` without use the LEDs switch to `effect`; [`Effect::Off`]
+    /// turns them off.
+    After { minutes: u8, effect: Effect },
+}
+
+impl LedTimeout {
+    /// Effects the official software offers after the time-out.
+    pub const EFFECTS: [Effect; 6] = [
+        Effect::Off,
+        Effect::Static,
+        Effect::Breathing,
+        Effect::Heartbeat,
+        Effect::Blinking,
+        Effect::Aimo,
+    ];
+}
+
+impl fmt::Display for LedTimeout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Never => f.pad("never"),
+            Self::After { minutes, effect } => write!(f, "after {minutes} min, then {effect}"),
+        }
+    }
+}
+
+/// Settings block 0: polling rate, DPI stages, lift-off, angle snapping, DPI
+/// auto flags, LED time-out and debounce time of one profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sensor {
     bytes: [u8; SENSOR_LEN],
@@ -252,8 +291,14 @@ impl Sensor {
     const ACTIVE_STAGE: usize = 3;
     const DPI_STAGES: usize = 4;
     const LIFT_OFF: usize = 14;
+    /// One bit per DPI stage ("AUTO" in the official software).
+    const DPI_AUTO: usize = 15;
     /// Unknown field; the official software clears bit 7 before writing it back.
     const FLAGS: usize = 16;
+    const LED_TIMEOUT_MINUTES: usize = 17;
+    const SLEEP_EFFECT: usize = 18;
+    /// Sleep effect value for "never time out" (with 0 minutes).
+    const SLEEP_EFFECT_NEVER: u8 = 0xff;
     const DEBOUNCE: usize = 19;
 
     pub const fn from_bytes(bytes: [u8; SENSOR_LEN]) -> Self {
@@ -325,6 +370,63 @@ impl Sensor {
         Ok(())
     }
 
+    /// The "AUTO" flag of `stage` (1–5).
+    pub fn dpi_auto(&self, stage: u8) -> Result<bool> {
+        let bit: usize = stage_index(stage)?;
+        Ok(self.bytes[Self::DPI_AUTO] & (1 << bit) != 0)
+    }
+
+    /// Sets the "AUTO" flag of `stage` (1–5). Setting it needs an enabled
+    /// stage, as in the official software; clearing it always works.
+    pub fn set_dpi_auto(&mut self, stage: u8, auto: bool) -> Result<()> {
+        let bit: usize = stage_index(stage)?;
+        if auto && self.dpi(stage)?.is_none() {
+            return Err(Error::InvalidValue(format!(
+                "DPI stage {stage} is disabled; give it a DPI value first"
+            )));
+        }
+        if auto {
+            self.bytes[Self::DPI_AUTO] |= 1 << bit;
+        } else {
+            self.bytes[Self::DPI_AUTO] &= !(1 << bit);
+        }
+        Ok(())
+    }
+
+    pub fn led_timeout(&self) -> LedTimeout {
+        match self.bytes[Self::SLEEP_EFFECT] {
+            Self::SLEEP_EFFECT_NEVER => LedTimeout::Never,
+            effect => LedTimeout::After {
+                minutes: self.bytes[Self::LED_TIMEOUT_MINUTES],
+                effect: Effect::from_code(effect),
+            },
+        }
+    }
+
+    /// Sets the LED time-out: at least 1 minute, and one of
+    /// [`LedTimeout::EFFECTS`].
+    pub fn set_led_timeout(&mut self, timeout: LedTimeout) -> Result<()> {
+        let (minutes, effect): (u8, u8) = match timeout {
+            LedTimeout::Never => (0, Self::SLEEP_EFFECT_NEVER),
+            LedTimeout::After { minutes, effect } => {
+                if minutes == 0 {
+                    return Err(Error::InvalidValue(
+                        "the LED time-out must be at least 1 minute".to_owned(),
+                    ));
+                }
+                if !LedTimeout::EFFECTS.contains(&effect) {
+                    return Err(Error::InvalidValue(format!(
+                        "{effect} cannot be used after the LED time-out"
+                    )));
+                }
+                (minutes, effect.code())
+            }
+        };
+        self.bytes[Self::LED_TIMEOUT_MINUTES] = minutes;
+        self.bytes[Self::SLEEP_EFFECT] = effect;
+        Ok(())
+    }
+
     /// Active DPI stage, 1-based.
     pub const fn active_stage(&self) -> u8 {
         self.bytes[Self::ACTIVE_STAGE].saturating_add(1)
@@ -379,12 +481,26 @@ impl Sensor {
                     "DPI stage {stage} is the active stage; activate another stage before disabling it"
                 )));
             }
-            None => 0,
+            None => {
+                // A disabled stage keeps no AUTO flag (the official software
+                // offers it only for enabled stages).
+                self.bytes[Self::DPI_AUTO] &= !(1 << index);
+                0
+            }
         };
         let offset: usize = Self::DPI_STAGES + 2 * index;
         self.bytes[offset..offset + 2].copy_from_slice(&steps.to_le_bytes());
         Ok(())
     }
+}
+
+fn check_intensity(percent: u8) -> Result<u8> {
+    if percent > INTENSITY_MAX {
+        return Err(Error::InvalidValue(format!(
+            "invalid intensity {percent}: use 0 to {INTENSITY_MAX}"
+        )));
+    }
+    Ok(percent)
 }
 
 fn stage_index(stage: u8) -> Result<usize> {
@@ -502,6 +618,8 @@ pub struct Lighting {
 
 impl Lighting {
     const EFFECT: usize = 0;
+    const LEFT_INTENSITY: usize = 1;
+    const RIGHT_INTENSITY: usize = 2;
     const BRIGHTNESS: usize = 3;
     const SPEED: usize = 4;
     const LEFT: usize = 5;
@@ -561,6 +679,28 @@ impl Lighting {
             )));
         }
         self.bytes[Self::SPEED] = speed;
+        Ok(())
+    }
+
+    /// Intensity of the left colour, in percent ("I" in the official software).
+    pub const fn left_intensity(&self) -> u8 {
+        self.bytes[Self::LEFT_INTENSITY]
+    }
+
+    /// Intensity of the right colour, in percent.
+    pub const fn right_intensity(&self) -> u8 {
+        self.bytes[Self::RIGHT_INTENSITY]
+    }
+
+    /// Sets the intensity of the left colour, 0–100 %.
+    pub fn set_left_intensity(&mut self, percent: u8) -> Result<()> {
+        self.bytes[Self::LEFT_INTENSITY] = check_intensity(percent)?;
+        Ok(())
+    }
+
+    /// Sets the intensity of the right colour, 0–100 %.
+    pub fn set_right_intensity(&mut self, percent: u8) -> Result<()> {
+        self.bytes[Self::RIGHT_INTENSITY] = check_intensity(percent)?;
         Ok(())
     }
 
@@ -697,6 +837,78 @@ mod tests {
     }
 
     #[test]
+    fn dpi_auto_flags() {
+        // Captures 40/41: AUTO on stage 2 sets bit 1 of byte 15.
+        let mut sensor = sensor();
+        assert!(!sensor.dpi_auto(2).expect("stage 2"));
+        sensor.set_dpi_auto(2, true).expect("enabled stage");
+        assert_eq!(sensor.bytes()[15], 0x02);
+        assert!(sensor.dpi_auto(2).expect("stage 2"));
+        assert!(sensor.set_dpi_auto(1, true).is_err(), "disabled stage");
+        sensor.set_dpi_auto(2, false).expect("enabled stage");
+        assert_eq!(sensor.bytes()[15], 0x00);
+        // Disabling a stage clears its flag; clearing works on disabled stages.
+        sensor.set_dpi(1, Some(400)).expect("valid DPI");
+        sensor.set_dpi_auto(1, true).expect("enabled stage");
+        sensor.set_dpi(1, None).expect("inactive stage");
+        assert!(!sensor.dpi_auto(1).expect("stage 1"));
+        sensor
+            .set_dpi_auto(1, false)
+            .expect("clearing is always allowed");
+    }
+
+    #[test]
+    fn led_timeout_matches_official_writes() {
+        let mut sensor = sensor();
+        // Start of the captures: 15 minutes, then off.
+        assert_eq!(
+            sensor.led_timeout(),
+            LedTimeout::After {
+                minutes: 15,
+                effect: Effect::Off
+            }
+        );
+        // Captures 31 and 37: 5 minutes, then breathing.
+        let breathing = LedTimeout::After {
+            minutes: 5,
+            effect: Effect::Breathing,
+        };
+        sensor.set_led_timeout(breathing).expect("valid time-out");
+        assert_eq!(sensor.bytes()[17..19], [0x05, 0x02]);
+        assert_eq!(sensor.led_timeout(), breathing);
+        // Capture 32: "none" = 0 minutes and ff.
+        sensor
+            .set_led_timeout(LedTimeout::Never)
+            .expect("valid time-out");
+        assert_eq!(sensor.bytes()[17..19], [0x00, 0xff]);
+        assert_eq!(sensor.led_timeout(), LedTimeout::Never);
+        assert_eq!(LedTimeout::Never.to_string(), "never");
+        assert_eq!(breathing.to_string(), "after 5 min, then breathing");
+    }
+
+    #[test]
+    fn rejects_invalid_led_timeouts() {
+        let mut sensor = sensor();
+        for timeout in [
+            LedTimeout::After {
+                minutes: 0,
+                effect: Effect::Off,
+            },
+            LedTimeout::After {
+                minutes: 5,
+                effect: Effect::Wave,
+            },
+            LedTimeout::After {
+                minutes: 5,
+                effect: Effect::Other(0x03),
+            },
+        ] {
+            assert!(sensor.set_led_timeout(timeout).is_err(), "{timeout:?}");
+        }
+        assert_eq!(sensor.bytes(), SENSOR_START);
+    }
+
+    #[test]
     fn polling_rate_codes() {
         // Captures 08–10.
         let mut sensor = sensor();
@@ -726,6 +938,11 @@ mod tests {
         assert_eq!(sensor.lift_off(), LiftOff::VeryLow);
         assert!(sensor.set_lift_off(LiftOff::Other(0x09)).is_err());
         assert_eq!(LiftOff::from_code(0x09), LiftOff::Other(0x09));
+        // Capture 44: the lift-off calibration ends with 08 ("custom").
+        sensor.set_lift_off(LiftOff::Custom).expect("known value");
+        assert_eq!(sensor.bytes()[14], 0x08);
+        assert_eq!(LiftOff::from_code(0x08), LiftOff::Custom);
+        assert_eq!("custom".parse::<LiftOff>().expect("valid"), LiftOff::Custom);
         assert_eq!(
             "very-low".parse::<LiftOff>().expect("valid"),
             LiftOff::VeryLow
@@ -755,6 +972,21 @@ mod tests {
                 0x01, 0x64, 0x64, 0x46, 0x04, 0xf4, 0x00, 0x00, 0x12, 0x34, 0x56
             ]
         );
+    }
+
+    #[test]
+    fn colour_intensities_match_official_writes() {
+        // Captures 42/43: left intensity 49 (31), right 29 (1d).
+        let mut lighting = Lighting::from_bytes(LIGHTING_START);
+        assert_eq!(
+            (lighting.left_intensity(), lighting.right_intensity()),
+            (100, 100)
+        );
+        lighting.set_left_intensity(49).expect("valid intensity");
+        lighting.set_right_intensity(29).expect("valid intensity");
+        assert_eq!(lighting.bytes()[1..3], [0x31, 0x1d]);
+        assert!(lighting.set_left_intensity(101).is_err());
+        assert_eq!(lighting.left_intensity(), 49);
     }
 
     #[test]
