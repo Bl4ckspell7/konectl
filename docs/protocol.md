@@ -108,7 +108,7 @@ The mouse has five profile slots; Swarm uses slots 1–3.
 
 | Block | Read                  | Write                 | Length | Content                    |
 |-------|-----------------------|-----------------------|--------|----------------------------|
-| 0     | `90 00 04 00 18 25 51 32` (offset 10) | `10 50 14 00 …` | 20 | DPI, polling rate, lift-off, debounce |
+| 0     | `90 00 04 00 18 25 51 32` (offset 10) | `10 50 14 00 …` | 20 | DPI, polling rate, lift-off, angle snapping, debounce |
 | 1     | `90 01` (offset 4)    | `10 50 0b 01 …`       | 11     | saved lighting             |
 | 2     | `90 02` (offset 4)    | `10 50 1c 02 …`       | 28     | *unknown*                  |
 | 3     | `90 04` (offset 4)    | `10 50 18 03 …`       | 24     | button assignment (layout *unknown*) |
@@ -135,8 +135,9 @@ Offsets are into the block (write: report offset 4 + n; read: offset 10 + n).
 | 18    | *unknown* (`00`)                                               |
 | 19    | debounce time in ms (write only; the read returns it at offset 41) |
 
-All of block 0 is stored per profile. Swarm shows only one debounce time and
-writes it into every profile; the others are set per profile in Swarm.
+All of block 0 is stored per profile. Swarm shows only one debounce time
+(0–10 ms) and writes it into every profile; the others are set per profile in
+Swarm. `konectl debounce` does the same.
 
 Swarm's slider goes from 50 to 19000 DPI. A disabled stage is stored as `0` and
 shown as 50.

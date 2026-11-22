@@ -14,6 +14,7 @@ to the mouse directly over hidraw.
 | Battery level, wireless signal            | ✅     |
 | DPI stages and active stage               | ✅     |
 | Polling rate, lift-off distance           | ✅     |
+| Angle snapping, debounce time             | ✅     |
 | Saved lighting (effect, colours, brightness, speed) | ✅ |
 | Profiles (show, activate, per-profile settings) | ✅ |
 | Backup and restore of these settings      | ✅     |
@@ -75,6 +76,8 @@ konectl dpi 3 off               # disable stage 3
 konectl stage 2                 # make stage 2 the active stage
 konectl rate 1000               # polling rate: 125, 250, 500 or 1000 Hz
 konectl liftoff low             # lift-off distance: very-low or low
+konectl angle-snapping off      # angle snapping: on or off
+konectl debounce 2              # debounce time in ms (0–10), set in all profiles
 konectl lighting static --left ff0000 --right 0000ff -b 60
 konectl lighting wave -s 4      # effects: off, static, breathing, heartbeat,
                                 #          wave, blinking, aimo, battery
