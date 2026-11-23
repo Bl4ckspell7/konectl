@@ -21,9 +21,9 @@ to the mouse directly over hidraw.
 | Profiles (show, activate, add, remove, colour, per-profile settings) | ✅ |
 | Factory reset, pairing with the dongle    | ✅     |
 | Button assignment (standard and Easy-Shift layer) | ✅ |
-| Backup and restore of the per-profile settings and buttons (not energy saving or the lift-off calibration) | ✅ |
+| Macros (keys with delays, played by the mouse itself) | ✅ |
+| Backup and restore of the per-profile settings and buttons (not energy saving, the lift-off calibration or the keys of macros) | ✅ |
 | Live LED colours (lost on sleep)          | ✅     |
-| Macros                                    | ❌ not decoded |
 
 Tested with mouse firmware 4.32 (dongle firmware 4.19), over the wireless dongle
 and the USB cable. See
@@ -102,6 +102,8 @@ konectl button 7 back           # rear side button: browser back
 konectl button 7 key:ctrl+c     # a key with modifiers
 konectl button 3 mute -e        # Easy-Shift layer: while the Easy-Shift button is held
 konectl button 7 easy-aim:400   # 400 DPI while the button is held
+konectl button 7 'macro:ctrl+c, 50ms, ctrl+v'   # a macro the mouse plays itself
+konectl button 7 'macro:space' --repeat 3       # … or --while-pressed / --toggle
                                 # all functions: konectl button --help
 
 konectl backup my-mouse.txt     # save all profiles
