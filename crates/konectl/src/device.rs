@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 use crate::protocol::{self, Battery, Report, Signal, Status};
 use crate::settings::{
     Effect, Firmware, Info, Lighting, PROFILE_COUNT, ProfileEntry, ProfileSettings, Sensor,
-    check_debounce_ms, profile_in_use, profile_index,
+    check_debounce_ms, profile_in_use, profile_index, set_profile_color,
 };
 use crate::transport::{HidTransport, Transport};
 
@@ -32,6 +32,13 @@ const CALIBRATION_QUIET: Duration = if cfg!(test) {
     Duration::ZERO
 } else {
     Duration::from_millis(200)
+};
+/// How long the reset command waits for its answer (about 1.5 s in the
+/// captures).
+const RESET_DEADLINE: Duration = if cfg!(test) {
+    Duration::from_millis(30)
+} else {
+    Duration::from_secs(5)
 };
 /// How long a request waits for its answer.
 const REPLY_DEADLINE: Duration = if cfg!(test) {
@@ -160,6 +167,16 @@ impl Manager {
     pub fn open(&self, info: &DeviceInfo) -> Result<KoneProAir<HidTransport>> {
         let device = self.api.open_path(&info.path)?;
         KoneProAir::connect(HidTransport::new(device), info.mode)
+    }
+
+    /// Opens the first device connected in `mode`.
+    pub fn open_mode(&self, mode: ConnectionMode) -> Result<KoneProAir<HidTransport>> {
+        let info: DeviceInfo = self
+            .devices()
+            .into_iter()
+            .find(|device| device.mode == mode)
+            .ok_or(Error::NotFound)?;
+        self.open(&info)
     }
 
     /// Opens the first device, preferring a cable connection.
@@ -318,6 +335,7 @@ impl<T: Transport> KoneProAir<T> {
             &report,
             "lift-off calibration",
             0,
+            REPLY_DEADLINE,
             |reply| match protocol::parse_status(reply, &report) {
                 Some(Status::Accepted) => Some(Ok(())),
                 Some(Status::Error(code)) => Some(Err(Error::Rejected {
@@ -329,6 +347,169 @@ impl<T: Transport> KoneProAir<T> {
         )?;
         std::thread::sleep(WRITE_SETTLE);
         Ok(())
+    }
+
+    /// Resets the mouse to its factory settings: the profiles in use get
+    /// default settings, lighting, buttons and colours (the number of
+    /// profiles stays the same), and energy saving is switched on.
+    ///
+    /// Not repeated when unanswered.
+    pub fn reset(&mut self) -> Result<()> {
+        const WHAT: &str = "reset";
+        let report: Report = protocol::reset();
+        self.exchange_with(
+            &report,
+            WHAT,
+            0,
+            RESET_DEADLINE,
+            |reply| match protocol::parse_status(reply, &report) {
+                Some(Status::Accepted) => Some(Ok(())),
+                Some(Status::Error(code)) => Some(Err(Error::Rejected {
+                    command: WHAT,
+                    code,
+                })),
+                None => None,
+            },
+        )?;
+        std::thread::sleep(WRITE_SETTLE);
+        Ok(())
+    }
+
+    /// Puts the dongle into pairing mode. Only through the dongle: the mouse
+    /// is then paired by holding its profile button for three seconds while it
+    /// runs on battery, and the dongle is plugged in again afterwards.
+    pub fn start_pairing(&mut self) -> Result<()> {
+        if self.mode != ConnectionMode::Wireless {
+            return Err(Error::InvalidValue(
+                "pairing works through the dongle, not over the USB cable".to_owned(),
+            ));
+        }
+        self.command(&protocol::start_pairing(), "pairing start")
+    }
+
+    /// Sets the colour the DPI LED flashes when the mouse switches to
+    /// `profile`; `None` removes it.
+    pub fn set_profile_color(&mut self, profile: u8, color: Option<Rgb>) -> Result<()> {
+        let mut entry: ProfileEntry = self.profile_entry(profile)?;
+        set_profile_color(&mut entry, color);
+        self.command(
+            &protocol::write_profile_entry(profile, &entry),
+            "profile table write",
+        )?;
+        if self.profile_entry(profile)? != entry {
+            return Err(Error::VerifyFailed("profile colour"));
+        }
+        Ok(())
+    }
+
+    /// Adds a profile in the first free slot as a copy of `copy_from` (its
+    /// settings and buttons, without the profile colour) and returns its number.
+    pub fn add_profile(&mut self, copy_from: u8) -> Result<u8> {
+        let table = self.profile_table()?;
+        let source: usize = profile_index(copy_from)?;
+        if !profile_in_use(&table[source]) {
+            return Err(Error::UnusedProfile(copy_from));
+        }
+        let free: usize = table
+            .iter()
+            .position(|entry| !profile_in_use(entry))
+            .ok_or_else(|| {
+                Error::InvalidValue(format!("all {PROFILE_COUNT} profile slots are in use"))
+            })?;
+        // Index 0–4, so the cast cannot truncate.
+        let number: u8 = free as u8 + 1;
+        let (settings, buttons) = self.read_profile_and_buttons(copy_from)?;
+        let mut entry: ProfileEntry = table[source];
+        set_profile_color(&mut entry, None);
+        self.write_blocks(
+            &entry,
+            &settings.sensor.with_profile(number),
+            Some(&settings.lighting),
+            Some(&buttons.with_profile(number)),
+        )?;
+        Ok(number)
+    }
+
+    /// Removes `profile`, like the official software: the profiles after it
+    /// move down one slot (with their colours), and the last slot is cleared.
+    /// The active profile and the only profile in use cannot be removed.
+    ///
+    /// Buttons that switch to a profile (`profile:N`) are renumbered to keep
+    /// pointing at the same profile; those that switched to the removed one are
+    /// disabled. Returns how many were disabled.
+    pub fn remove_profile(&mut self, profile: u8) -> Result<usize> {
+        let table = self.profile_table()?;
+        let in_use: Vec<u8> = (1u8..)
+            .zip(&table)
+            .filter(|(_, entry)| profile_in_use(entry))
+            .map(|(number, _)| number)
+            .collect();
+        if !in_use.contains(&profile) {
+            return Err(Error::UnusedProfile(profile));
+        }
+        if in_use.len() == 1 {
+            return Err(Error::InvalidValue(format!(
+                "profile {profile} is the only profile"
+            )));
+        }
+        let active: u8 = self.active_profile()?;
+        if profile == active {
+            return Err(Error::InvalidValue(format!(
+                "profile {profile} is active: activate another profile first"
+            )));
+        }
+
+        // Read every remaining profile before anything is written: the later
+        // ones move, and any of them may have buttons to renumber.
+        let remaining: Vec<u8> = in_use
+            .iter()
+            .copied()
+            .filter(|&number| number != profile)
+            .collect();
+        let mut writes: Vec<(u8, bool, ProfileEntry, ProfileSettings, Buttons)> = Vec::new();
+        let mut disabled: usize = 0;
+        for (target, &source) in (1u8..).zip(&remaining) {
+            let (settings, mut buttons) = self.read_profile_and_buttons(source)?;
+            let (renumbered, cleared) = buttons.renumber_profiles(profile);
+            disabled += cleared;
+            let moves: bool = target != source;
+            if moves || renumbered > 0 {
+                let entry: ProfileEntry = table[usize::from(source - 1)];
+                writes.push((target, moves, entry, settings, buttons));
+            }
+        }
+        for (target, moves, entry, settings, buttons) in &writes {
+            // A profile that stays in its slot keeps its lighting as it is.
+            self.write_blocks(
+                entry,
+                &settings.sensor.with_profile(*target),
+                moves.then_some(&settings.lighting),
+                Some(&buttons.with_profile(*target)),
+            )?;
+        }
+        // The active profile moved with its settings.
+        let moved_active: u8 = (1u8..)
+            .zip(&remaining)
+            .find(|(_, number)| **number == active)
+            .map_or(active, |(target, _)| target);
+        if moved_active != active {
+            self.set_active_profile(moved_active)?;
+        }
+        for &number in &in_use {
+            if usize::from(number) > remaining.len() {
+                self.command(
+                    &protocol::clear_profile_entry(number),
+                    "profile table write",
+                )?;
+            }
+        }
+        Ok(disabled)
+    }
+
+    /// `false` once the device is gone, e.g. the dongle was unplugged:
+    /// reading from it fails. Sends nothing; drops queued reports.
+    pub fn is_present(&mut self) -> bool {
+        self.discard_pending(0).is_ok()
     }
 
     /// Makes `profile` (1–5) the active profile.
@@ -421,10 +602,7 @@ impl<T: Transport> KoneProAir<T> {
         let mut profiles: Vec<ProfileBackup> = Vec::new();
         for (entry, number) in table.into_iter().zip(1u8..) {
             if profile_in_use(&entry) {
-                let (settings, buttons) = self.read_profile(Some(number), |mouse, target| {
-                    let settings: ProfileSettings = mouse.read_selected_settings(target)?;
-                    Ok((settings, mouse.read_selected_buttons(target)?))
-                })?;
+                let (settings, buttons) = self.read_profile_and_buttons(number)?;
                 profiles.push(ProfileBackup {
                     entry,
                     settings,
@@ -442,8 +620,19 @@ impl<T: Transport> KoneProAir<T> {
 
     /// Checks that `backup` fits the mouse: the firmware versions it records
     /// must match the mouse's, and the dongle's when both are known. Button
-    /// assignments must belong to the profile they are stored with.
+    /// assignments must belong to the profile they are stored with, and the
+    /// active profile must be in the backup.
     pub fn check_backup(&mut self, backup: &Backup) -> Result<()> {
+        if !backup
+            .profiles
+            .iter()
+            .any(|profile| profile.settings.profile() == backup.active_profile)
+        {
+            return Err(Error::InvalidBackup(format!(
+                "its active profile {} is not in it",
+                backup.active_profile
+            )));
+        }
         for profile in &backup.profiles {
             if let Some(buttons) = &profile.buttons
                 && buttons.profile() != profile.settings.profile()
@@ -477,7 +666,8 @@ impl<T: Transport> KoneProAir<T> {
 
     /// Writes a backup back to the mouse and activates its active profile,
     /// after [`Self::check_backup`]. Button assignments are written if the
-    /// backup has them (backups of konectl 0.2 and older do not).
+    /// backup has them (backups of konectl 0.2 and older do not). Profile
+    /// slots in use that the backup does not have are cleared afterwards.
     pub fn restore(&mut self, backup: &Backup) -> Result<()> {
         self.check_backup(backup)?;
         for profile in &backup.profiles {
@@ -489,7 +679,21 @@ impl<T: Transport> KoneProAir<T> {
                 profile.buttons.as_ref(),
             )?;
         }
-        self.set_active_profile(backup.active_profile)
+        self.set_active_profile(backup.active_profile)?;
+        let kept: Vec<u8> = backup
+            .profiles
+            .iter()
+            .map(|profile| profile.settings.profile())
+            .collect();
+        for (number, entry) in (1u8..).zip(self.profile_table()?) {
+            if profile_in_use(&entry) && !kept.contains(&number) {
+                self.command(
+                    &protocol::clear_profile_entry(number),
+                    "profile table write",
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// Table entry of `profile`; fails if the slot is not in use.
@@ -529,6 +733,14 @@ impl<T: Transport> KoneProAir<T> {
         let value: R = value?;
         restored?;
         Ok(value)
+    }
+
+    /// Reads the settings and buttons of `profile` with one selection.
+    fn read_profile_and_buttons(&mut self, profile: u8) -> Result<(ProfileSettings, Buttons)> {
+        self.read_profile(Some(profile), |mouse, target| {
+            let settings: ProfileSettings = mouse.read_selected_settings(target)?;
+            Ok((settings, mouse.read_selected_buttons(target)?))
+        })
     }
 
     /// Reads block 0 of the selected profile, which must be `profile`.
@@ -707,21 +919,22 @@ impl<T: Transport> KoneProAir<T> {
         what: &'static str,
         classify: impl Fn(&Report) -> Option<Result<R>>,
     ) -> Result<R> {
-        self.exchange_with(report, what, REQUEST_RETRIES, classify)
+        self.exchange_with(report, what, REQUEST_RETRIES, REPLY_DEADLINE, classify)
     }
 
-    /// [`Self::exchange`] with an explicit number of retries.
+    /// [`Self::exchange`] with an explicit number of retries and deadline.
     fn exchange_with<R>(
         &mut self,
         report: &Report,
         what: &'static str,
         retries: usize,
+        deadline: Duration,
         classify: impl Fn(&Report) -> Option<Result<R>>,
     ) -> Result<R> {
         for attempt in 0..=retries {
             self.discard_pending(0)?;
             self.transport.write_report(report)?;
-            if let Some(outcome) = self.await_reply(&classify)? {
+            if let Some(outcome) = self.await_reply_within(deadline, &classify)? {
                 if attempt > 0 {
                     // The first attempt may still be answered late.
                     self.discard_pending(DUPLICATE_WAIT_MS)?;
@@ -745,7 +958,16 @@ impl<T: Transport> KoneProAir<T> {
     /// Reads until `parse` accepts a report, skipping all others.
     /// Returns `Ok(None)` when nothing matched within [`REPLY_DEADLINE`].
     fn await_reply<R>(&mut self, parse: impl Fn(&Report) -> Option<R>) -> Result<Option<R>> {
-        let deadline: Instant = Instant::now() + REPLY_DEADLINE;
+        self.await_reply_within(REPLY_DEADLINE, parse)
+    }
+
+    /// [`Self::await_reply`] with another deadline.
+    fn await_reply_within<R>(
+        &mut self,
+        within: Duration,
+        parse: impl Fn(&Report) -> Option<R>,
+    ) -> Result<Option<R>> {
+        let deadline: Instant = Instant::now() + within;
         while Instant::now() < deadline {
             if let Some(reply) = self.transport.read_report(READ_TIMEOUT_MS)?
                 && let Some(value) = parse(&reply)
@@ -1215,11 +1437,12 @@ mod tests {
             vec![lighting_reply(&settings.lighting)],
         ];
         batches.extend(button_replies(&start_buttons()));
-        // activation of the backup's active profile
+        // activation of the backup's active profile, then the table check
         batches.extend([
             vec![single_profile_table()],
             vec![accepted(0x03)],
             vec![report_with_prefix(&INFO_REPLY)],
+            vec![single_profile_table()],
         ]);
         let mut mouse = connect(batches);
         mouse.restore(&backup).expect("restore");
@@ -1227,7 +1450,8 @@ mod tests {
         assert_eq!(written[2], protocol::write_sensor(&settings.sensor));
         assert_eq!(written[3], protocol::write_lighting(&settings.lighting));
         assert_eq!(written[4..7], protocol::write_buttons(&start_buttons()));
-        assert_eq!(written.last(), Some(&protocol::query_info()));
+        // Activation, then the check for slots the backup does not have.
+        assert_eq!(written.last(), Some(&protocol::query_profile_table()));
     }
 
     #[test]
@@ -1247,6 +1471,7 @@ mod tests {
             vec![single_profile_table()],
             vec![accepted(0x03)],
             vec![report_with_prefix(&INFO_REPLY)],
+            vec![single_profile_table()],
         ]);
         mouse.restore(&backup).expect("restore");
         let button_requests: usize = mouse.transport.written[1..]
@@ -1297,6 +1522,288 @@ mod tests {
         );
     }
 
+    /// Profile table with slots 1 to `count` in use.
+    fn table_with(count: usize) -> Report {
+        let mut reply: Report = report_with_prefix(&[0x90, 0x11, 0x19, 0x00]);
+        for slot in 0..count {
+            reply[4 + slot * 5..6 + slot * 5].copy_from_slice(&[0x01, 0x64]);
+        }
+        reply
+    }
+
+    /// The start settings and buttons, moved to profile `profile`.
+    fn profile_data(profile: u8) -> (ProfileSettings, Buttons) {
+        let settings = start_settings();
+        let settings = ProfileSettings {
+            sensor: settings.sensor.with_profile(profile),
+            lighting: settings.lighting,
+        };
+        (settings, start_buttons().with_profile(profile))
+    }
+
+    /// Replies for reading the settings and buttons of `profile` while profile
+    /// 1 is active.
+    fn read_profile_batches(profile: u8, table: Report) -> Vec<Vec<Report>> {
+        let (settings, buttons) = profile_data(profile);
+        let mut batches = vec![vec![report_with_prefix(&INFO_REPLY)]];
+        if profile != 1 {
+            batches.extend([vec![table], vec![accepted(0x13)]]);
+        }
+        batches.extend([
+            vec![info_reply(&settings.sensor)],
+            vec![lighting_reply(&settings.lighting)],
+        ]);
+        batches.extend(button_replies(&buttons));
+        if profile != 1 {
+            batches.push(vec![accepted(0x13)]);
+        }
+        batches
+    }
+
+    /// Replies for writing all blocks of `profile` (not active) with the start
+    /// data, read back the same way.
+    fn write_profile_batches(profile: u8, table: Report) -> Vec<Vec<Report>> {
+        let mut batches = vec![vec![accepted(0x11)]];
+        batches.extend(vec![vec![accepted(0x50)]; 5]);
+        let (settings, buttons) = profile_data(profile);
+        let stored = Sensor::from_bytes(settings.sensor.write_bytes());
+        batches.extend([
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![table],
+            vec![accepted(0x13)],
+            vec![info_reply(&stored)],
+            vec![lighting_reply(&settings.lighting)],
+        ]);
+        batches.extend(button_replies(&buttons));
+        batches.push(vec![accepted(0x13)]);
+        batches
+    }
+
+    #[test]
+    fn add_profile_copies_into_the_first_free_slot() {
+        let mut batches = vec![vec![table_with(3)]];
+        batches.extend(read_profile_batches(1, table_with(3)));
+        batches.extend(write_profile_batches(4, table_with(4)));
+        let mut mouse = connect(batches);
+        assert_eq!(mouse.add_profile(1).expect("add"), 4);
+
+        let written: &[Report] = &mouse.transport.written[1..];
+        let entry_write: usize = written
+            .iter()
+            .position(|report| report[..2] == [0x10, 0x11])
+            .expect("table entry written");
+        // Capture 61: the entry of the new slot, then blocks 0–4 for it.
+        assert_eq!(
+            written[entry_write],
+            report_with_prefix(&[0x10, 0x11, 0x06, 0x00, 0x04, 0x01, 0x64])
+        );
+        let (settings, buttons) = profile_data(4);
+        assert_eq!(
+            written[entry_write + 1],
+            protocol::write_sensor(&settings.sensor)
+        );
+        assert_eq!(written[entry_write + 1][4], 4);
+        assert_eq!(
+            written[entry_write + 2],
+            protocol::write_lighting(&settings.lighting)
+        );
+        assert_eq!(
+            written[entry_write + 3..entry_write + 6],
+            protocol::write_buttons(&buttons)
+        );
+    }
+
+    #[test]
+    fn add_profile_needs_a_free_slot() {
+        let mut mouse = connect(vec![vec![table_with(5)]]);
+        assert!(matches!(mouse.add_profile(1), Err(Error::InvalidValue(_))));
+        let mut mouse = connect(vec![vec![table_with(3)]]);
+        assert!(matches!(mouse.add_profile(4), Err(Error::UnusedProfile(4))));
+    }
+
+    #[test]
+    fn remove_profile_moves_the_later_ones_down() {
+        // Profiles 1–3, 1 active; removing 2 moves 3 to 2 and clears slot 3
+        // (capture 63).
+        let mut batches = vec![vec![table_with(3)], vec![report_with_prefix(&INFO_REPLY)]];
+        // Profile 1 stays (no buttons to renumber), profile 3 moves.
+        batches.extend(read_profile_batches(1, table_with(3)));
+        batches.extend(read_profile_batches(3, table_with(3)));
+        batches.extend(write_profile_batches(2, table_with(3)));
+        batches.push(vec![accepted(0x11)]);
+        let mut mouse = connect(batches);
+        assert_eq!(mouse.remove_profile(2).expect("remove"), 0);
+
+        let written: &[Report] = &mouse.transport.written[1..];
+        assert!(written.contains(&report_with_prefix(&[
+            0x10, 0x11, 0x06, 0x00, 0x02, 0x01, 0x64
+        ])));
+        let (settings, _) = profile_data(2);
+        assert!(written.contains(&protocol::write_sensor(&settings.sensor)));
+        assert_eq!(written.last(), Some(&protocol::clear_profile_entry(3)));
+        // The active profile did not move.
+        assert!(written.iter().all(|report| report[..2] != [0x10, 0x03]));
+    }
+
+    #[test]
+    fn remove_profile_activates_the_moved_active_profile() {
+        // Profiles 1–3, 3 active; removing 1 moves 2 to 1 and 3 to 2.
+        let profile_3 = profile_data(3).0.sensor;
+        let table = table_with(3);
+        let mut batches = vec![vec![table], vec![info_reply(&profile_3)]];
+        for source in [2, 3] {
+            let (settings, buttons) = profile_data(source);
+            batches.push(vec![info_reply(&profile_3)]);
+            if source != 3 {
+                batches.extend([vec![table], vec![accepted(0x13)]]);
+            }
+            batches.extend([
+                vec![info_reply(&settings.sensor)],
+                vec![lighting_reply(&settings.lighting)],
+            ]);
+            batches.extend(button_replies(&buttons));
+            if source != 3 {
+                batches.push(vec![accepted(0x13)]);
+            }
+        }
+        for target in [1, 2] {
+            batches.push(vec![accepted(0x11)]);
+            batches.extend(vec![vec![accepted(0x50)]; 5]);
+            let (settings, buttons) = profile_data(target);
+            let stored = Sensor::from_bytes(settings.sensor.write_bytes());
+            batches.extend([
+                vec![info_reply(&profile_3)],
+                vec![table],
+                vec![accepted(0x13)],
+                vec![info_reply(&stored)],
+                vec![lighting_reply(&settings.lighting)],
+            ]);
+            batches.extend(button_replies(&buttons));
+            batches.push(vec![accepted(0x13)]);
+        }
+        let moved_active = profile_data(2).0.sensor;
+        batches.extend([
+            vec![table],
+            vec![accepted(0x03)],
+            vec![info_reply(&moved_active)],
+            vec![accepted(0x11)],
+        ]);
+        let mut mouse = connect(batches);
+        mouse.remove_profile(1).expect("remove");
+
+        let written: &[Report] = &mouse.transport.written[1..];
+        let activation: usize = written
+            .iter()
+            .position(|report| *report == protocol::activate_profile(2))
+            .expect("activation");
+        // Activated before its old slot is cleared.
+        assert_eq!(written[activation + 2], protocol::clear_profile_entry(3));
+        assert_eq!(written.last(), Some(&protocol::clear_profile_entry(3)));
+    }
+
+    #[test]
+    fn remove_profile_refuses_the_active_and_the_only_profile() {
+        let mut mouse = connect(vec![
+            vec![table_with(3)],
+            vec![report_with_prefix(&INFO_REPLY)],
+        ]);
+        assert!(matches!(
+            mouse.remove_profile(1),
+            Err(Error::InvalidValue(_))
+        ));
+        let mut mouse = connect(vec![vec![table_with(1)]]);
+        assert!(matches!(
+            mouse.remove_profile(1),
+            Err(Error::InvalidValue(_))
+        ));
+        let mut mouse = connect(vec![vec![table_with(3)]]);
+        assert!(matches!(
+            mouse.remove_profile(4),
+            Err(Error::UnusedProfile(4))
+        ));
+        // Nothing but table and info reads was sent.
+        assert!(
+            mouse.transport.written[1..]
+                .iter()
+                .all(|report| report[0] == 0x90)
+        );
+    }
+
+    #[test]
+    fn profile_colour_is_written_to_the_table_entry() {
+        let mut coloured = table_with(3);
+        coloured[9..14].copy_from_slice(&[0x01, 0x64, 0xf4, 0x00, 0x00]);
+        let mut mouse = connect(vec![
+            vec![table_with(3)],
+            vec![accepted(0x11)],
+            vec![coloured],
+        ]);
+        mouse
+            .set_profile_color(2, Some(Rgb::new(0xf4, 0, 0)))
+            .expect("colour");
+        // Capture 58: red for profile slot 2.
+        assert_eq!(
+            mouse.transport.written[2],
+            report_with_prefix(&[0x10, 0x11, 0x06, 0x00, 0x02, 0x01, 0x64, 0xf4])
+        );
+    }
+
+    #[test]
+    fn restore_clears_profiles_the_backup_does_not_have() {
+        let mut backup = start_backup();
+        backup.profiles[0].buttons = None;
+        let settings = start_settings();
+        let stored_sensor = Sensor::from_bytes(settings.sensor.write_bytes());
+        let mut mouse = connect(vec![
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![accepted(0x11)],
+            vec![accepted(0x50)],
+            vec![accepted(0x50)],
+            vec![info_reply(&stored_sensor)],
+            vec![info_reply(&stored_sensor)],
+            vec![lighting_reply(&settings.lighting)],
+            vec![table_with(4)],
+            vec![accepted(0x03)],
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![table_with(4)],
+            vec![accepted(0x11)],
+            vec![accepted(0x11)],
+            vec![accepted(0x11)],
+        ]);
+        mouse.restore(&backup).expect("restore");
+        let written: &[Report] = &mouse.transport.written[1..];
+        assert_eq!(
+            written[written.len() - 3..],
+            [
+                protocol::clear_profile_entry(2),
+                protocol::clear_profile_entry(3),
+                protocol::clear_profile_entry(4)
+            ]
+        );
+    }
+
+    #[test]
+    fn reset_waits_long_and_is_not_repeated() {
+        let mut mouse = connect(vec![vec![accepted(0x62)]]);
+        mouse.reset().expect("reset");
+        assert_eq!(mouse.transport.written[1], protocol::reset());
+        let mut mouse = connect(vec![]);
+        assert!(matches!(mouse.reset(), Err(Error::Timeout("reset"))));
+        assert_eq!(mouse.transport.written.len(), 2);
+    }
+
+    #[test]
+    fn pairing_needs_the_dongle() {
+        let mut mouse = connect(vec![vec![accepted(0x09)]]);
+        mouse.start_pairing().expect("pairing");
+        assert_eq!(mouse.transport.written[1], protocol::start_pairing());
+        let transport = MockTransport::new(vec![vec![init_reply()]]);
+        let mut wired =
+            KoneProAir::connect(transport, ConnectionMode::Wired).expect("mock connect");
+        assert!(matches!(wired.start_pairing(), Err(Error::InvalidValue(_))));
+        assert_eq!(wired.transport.written.len(), 1);
+    }
+
     #[test]
     fn late_init_reply_is_skipped_by_the_info_query() {
         let late_init: Report = init_reply();
@@ -1336,10 +1843,21 @@ mod tests {
         let backup = Backup {
             firmware: mouse,
             dongle_firmware: dongle,
-            active_profile: 1,
-            profiles: Vec::new(),
+            ..start_backup()
         };
         connect(vec![vec![report_with_prefix(info_reply)]]).check_backup(&backup)
+    }
+
+    #[test]
+    fn backup_must_contain_its_active_profile() {
+        let backup = Backup {
+            active_profile: 2,
+            ..start_backup()
+        };
+        assert!(matches!(
+            connect(vec![]).check_backup(&backup),
+            Err(Error::InvalidBackup(_))
+        ));
     }
 
     #[test]

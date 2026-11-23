@@ -89,6 +89,11 @@ impl Buttons {
         self.profile
     }
 
+    /// The same assignments for profile `profile`, e.g. to copy a profile.
+    pub(crate) const fn with_profile(&self, profile: u8) -> Self {
+        Self { profile, ..*self }
+    }
+
     /// Block 2: function codes.
     pub(crate) const fn functions(&self) -> &[u8; FUNCTIONS_LEN] {
         &self.functions
@@ -131,7 +136,8 @@ impl Buttons {
     /// - the Easy-Shift layer has no Easy-Shift function, and an Easy-Shift
     ///   button has no function in it (setting Easy-Shift disables it).
     ///
-    /// [`ButtonAction::Host`] and [`ButtonAction::Other`] cannot be set.
+    /// [`ButtonAction::Host`], [`ButtonAction::FactoryDefault`] and
+    /// [`ButtonAction::Other`] cannot be set.
     pub fn set_action(&mut self, button: u8, layer: Layer, action: ButtonAction) -> Result<()> {
         let slot: usize = slot(button)?;
         action.check()?;
@@ -173,6 +179,34 @@ impl Buttons {
             self.store(slot, Layer::EasyShift, ButtonAction::Disabled);
         }
         Ok(())
+    }
+
+    /// Renumbers the buttons that switch to a profile after profile `removed`
+    /// was removed and the later ones moved down one slot: a later profile gets
+    /// its new number, `removed` itself becomes [`ButtonAction::Disabled`].
+    /// Returns how many functions changed and how many of them were disabled.
+    pub(crate) fn renumber_profiles(&mut self, removed: u8) -> (usize, usize) {
+        let (mut changed, mut disabled) = (0, 0);
+        for (button, &slot) in (1u8..).zip(&SLOTS) {
+            for layer in [Layer::Standard, Layer::EasyShift] {
+                let Ok(ButtonAction::Special(Special::Profile(profile))) =
+                    self.action(button, layer)
+                else {
+                    continue;
+                };
+                let renumbered: ButtonAction = if profile > removed {
+                    ButtonAction::Special(Special::Profile(profile - 1))
+                } else if profile == removed {
+                    disabled += 1;
+                    ButtonAction::Disabled
+                } else {
+                    continue;
+                };
+                self.store(slot, layer, renumbered);
+                changed += 1;
+            }
+        }
+        (changed, disabled)
     }
 
     fn store(&mut self, slot: usize, layer: Layer, action: ButtonAction) {
@@ -223,15 +257,24 @@ pub enum ButtonAction {
     /// A function the official software carries out on the computer (open a
     /// program, lock the screen, …); the mouse only reports the press.
     Host(HostFunction),
+    /// The function the firmware gives the button after a factory reset
+    /// (stored as `ff ff ff ff`).
+    FactoryDefault,
     /// A combination konectl does not know.
     Other { code: u8, entry: [u8; ENTRY_LEN] },
 }
+
+/// Code and entry of [`ButtonAction::FactoryDefault`].
+const FACTORY_DEFAULT: u8 = 0xff;
 
 impl ButtonAction {
     fn decode(code: u8, entry: [u8; ENTRY_LEN]) -> Self {
         let other = Self::Other { code, entry };
         match (code, entry) {
             (CODE_DISABLED, ZERO_ENTRY) => Self::Disabled,
+            (FACTORY_DEFAULT, [FACTORY_DEFAULT, FACTORY_DEFAULT, FACTORY_DEFAULT]) => {
+                Self::FactoryDefault
+            }
             (CODE_ENTRY, [ENTRY_MOUSE, function, 0]) => {
                 MouseFunction::from_code(function).map_or(other, Self::Mouse)
             }
@@ -254,7 +297,10 @@ impl ButtonAction {
                     _ => other,
                 }
             }
-            (_, ZERO_ENTRY) => Special::from_code(code).map_or(other, Self::Special),
+            // After a factory reset the entries of special functions read `ff`.
+            (_, ZERO_ENTRY | [FACTORY_DEFAULT, FACTORY_DEFAULT, FACTORY_DEFAULT]) => {
+                Special::from_code(code).map_or(other, Self::Special)
+            }
             _ => other,
         }
     }
@@ -276,6 +322,7 @@ impl ButtonAction {
             }
             Self::Host(HostFunction::System(id)) => (CODE_ENTRY, [ENTRY_SYSTEM, id, 0]),
             Self::Host(HostFunction::Swarm(id)) => (CODE_ENTRY, [ENTRY_SWARM, id, 0]),
+            Self::FactoryDefault => (FACTORY_DEFAULT, [FACTORY_DEFAULT; ENTRY_LEN]),
             Self::Other { code, entry } => (code, entry),
         }
     }
@@ -312,7 +359,7 @@ impl ButtonAction {
                 "{self} is carried out by the official software, not by the mouse; konectl does \
                  not set it"
             )),
-            Self::Other { .. } => invalid(format!("{self} cannot be set")),
+            Self::FactoryDefault | Self::Other { .. } => invalid(format!("{self} cannot be set")),
         }
     }
 
@@ -360,6 +407,7 @@ impl fmt::Display for ButtonAction {
             Self::Special(special) => special.to_string(),
             Self::EasyAim(dpi) => format!("easy-aim:{dpi}"),
             Self::Host(function) => function.to_string(),
+            Self::FactoryDefault => "factory-default".to_owned(),
             Self::Other { code, entry } => format!(
                 "unknown ({code:02x} {:02x} {:02x} {:02x})",
                 entry[0], entry[1], entry[2]
@@ -1079,6 +1127,21 @@ pub(crate) mod tests {
             ButtonAction::decode(0x40, [0x02, 0x34, 0x12]),
             ButtonAction::Other { .. }
         ));
+        // After a factory reset (capture 64, read with konectl); button 8
+        // keeps profile cycle with an `ff` entry.
+        assert_eq!(
+            ButtonAction::decode(0x41, [0xff; 3]).to_string(),
+            "profile-cycle"
+        );
+        let reset = ButtonAction::decode(0xff, [0xff; 3]);
+        assert_eq!(reset, ButtonAction::FactoryDefault);
+        assert_eq!(reset.to_string(), "factory-default");
+        assert_eq!(reset.encode(), (0xff, [0xff; 3]));
+        assert!(
+            start_buttons()
+                .set_action(7, Layer::Standard, reset)
+                .is_err()
+        );
         let unknown = ButtonAction::decode(0x5f, ZERO_ENTRY);
         assert_eq!(unknown.to_string(), "unknown (5f 00 00 00)");
         assert_eq!(unknown.encode(), (0x5f, ZERO_ENTRY));
@@ -1167,6 +1230,27 @@ pub(crate) mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn removing_a_profile_renumbers_the_buttons_that_switch_to_it() {
+        let mut buttons = start_buttons();
+        for (button, layer, action) in [
+            (7, Layer::Standard, "profile:3"),
+            (3, Layer::Standard, "profile:1"),
+            (7, Layer::EasyShift, "profile:2"),
+        ] {
+            buttons
+                .set_action(button, layer, action.parse().expect("action"))
+                .expect("allowed");
+        }
+        assert_eq!(buttons.renumber_profiles(2), (2, 1));
+        let shown =
+            |button: u8, layer: Layer| buttons.action(button, layer).expect("button").to_string();
+        assert_eq!(shown(7, Layer::Standard), "profile:2");
+        assert_eq!(shown(3, Layer::Standard), "profile:1");
+        assert_eq!(shown(7, Layer::EasyShift), "disabled");
+        assert_eq!(start_buttons().renumber_profiles(1), (0, 0));
     }
 
     #[test]

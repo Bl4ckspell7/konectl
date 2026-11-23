@@ -11,8 +11,8 @@
 #   KONECTL_RE_USB= docker compose -f tools/re/compose.yaml up -d
 #   docker compose -f tools/re/compose.yaml up -d --force-recreate
 #
-# Over the USB cable instead of the dongle:
-#   KONECTL_RE_USB="-device usb-host,vendorid=0x1e7d,productid=0x2c92" \
+# Over the USB cable instead of the dongle (or both, with two -device options):
+#   KONECTL_RE_USB="-device usb-host,vendorid=0x1e7d,productid=0x2c92,id=cable" \
 #       docker compose -f tools/re/compose.yaml up -d --force-recreate
 name: konectl-re
 
@@ -28,17 +28,21 @@ services:
       # QMP socket for scripted mouse and keyboard input (tools/re/vm.sh). By default
       # the wireless dongle is handed to the VM, so the host loses the mouse while the
       # VM runs; KONECTL_RE_USB set to an empty string disables the passthrough.
-      ARGUMENTS: "-qmp unix:/run/shm/qmp.sock,server=on,wait=off ${KONECTL_RE_USB--device usb-host,vendorid=0x1e7d,productid=0x2c8e}"
+      ARGUMENTS: "-qmp unix:/run/shm/qmp.sock,server=on,wait=off ${KONECTL_RE_USB--device usb-host,vendorid=0x1e7d,productid=0x2c8e,id=dongle}"
     devices:
       - /dev/kvm
       - /dev/net/tun
-      - /dev/bus/usb
+    # USB devices as a bind mount plus a cgroup rule (instead of `devices:`), so
+    # a mouse or dongle plugged in after the start can be passed through too.
+    device_cgroup_rules:
+      - "c 189:* rmw"
     cap_add:
       - NET_ADMIN
     ports:
       - "127.0.0.1:8006:8006" # web viewer, local only
     volumes:
       - windows-storage:/storage
+      - /dev/bus/usb:/dev/bus/usb
       # Installation ISO from tools/re/fetch-iso.sh (replaces dockur's own download).
       - type: bind
         source: ${KONECTL_RE_DIR:-${HOME}/.local/share/konectl-re}/win11-ltsc-eval.iso

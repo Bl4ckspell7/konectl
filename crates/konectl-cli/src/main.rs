@@ -11,16 +11,16 @@ use std::io::{self, IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use konectl::buttons::{BUTTON_COUNT, HostFunction, Special};
 use konectl::protocol::{REPORT_LEN, Report, VENDOR_ID};
-use konectl::settings::DEBOUNCE_MAX_MS;
+use konectl::settings::{DEBOUNCE_MAX_MS, PROFILE_COUNT, profile_color, profile_in_use};
 use konectl::{
-    Backup, ButtonAction, Buttons, Effect, HidTransport, KoneProAir, Layer, LiftOff, Manager,
-    PollingRate, ProfileSettings, Rgb,
+    Backup, ButtonAction, Buttons, ConnectionMode, Effect, HidTransport, KoneProAir, Layer,
+    LiftOff, Manager, PollingRate, ProfileSettings, Rgb,
 };
 
 /// Configure a ROCCAT Kone Pro Air mouse (unofficial).
@@ -50,11 +50,15 @@ enum Command {
         #[command(flatten)]
         target: ProfileArg,
     },
-    /// Show the profiles in use, or make PROFILE the active one.
+    /// Show the profiles in use, make PROFILE the active one, or add, remove
+    /// or colour profiles.
+    #[command(args_conflicts_with_subcommands = true)]
     Profile {
         /// Profile slot to activate (1–5).
         #[arg(value_parser = clap::value_parser!(u8).range(1..=5))]
         profile: Option<u8>,
+        #[command(subcommand)]
+        action: Option<ProfileAction>,
     },
     /// Set the DPI of a stage, or disable the stage.
     Dpi {
@@ -175,6 +179,18 @@ enum Command {
         #[command(flatten)]
         target: ProfileArg,
     },
+    /// Reset the mouse to its factory settings (asks first).
+    Reset {
+        /// Do not ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Pair the mouse with the dongle (asks first, then shows the steps).
+    Pair {
+        /// Do not ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Save the settings of all profiles to FILE.
     Backup { file: PathBuf },
     /// Write the settings from a backup FILE back to the mouse.
@@ -227,6 +243,45 @@ Limits, as in the official software: button 1 stays click; button 8 takes only
 the dpi-* and profile-* functions and has no Easy-Shift function; the wheel
 (4, 5) takes no easy-* functions; an Easy-Shift button has no Easy-Shift
 function.";
+
+#[derive(Debug, Subcommand)]
+enum ProfileAction {
+    /// Add a profile in the first free slot, as a copy of another one.
+    Add {
+        /// Profile to copy (1–5); defaults to the active profile.
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..=5))]
+        copy_from: Option<u8>,
+    },
+    /// Remove a profile (not the active one); the profiles after it move down one slot.
+    Remove {
+        #[arg(value_parser = clap::value_parser!(u8).range(1..=5))]
+        profile: u8,
+    },
+    /// Set the colour the DPI LED flashes when the mouse switches to a profile.
+    Color {
+        #[arg(value_parser = clap::value_parser!(u8).range(1..=5))]
+        profile: u8,
+        /// A colour such as f40000, or none.
+        color: ProfileColor,
+    },
+}
+
+/// A profile colour, or `none`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProfileColor(Option<Rgb>);
+
+impl FromStr for ProfileColor {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        if s == "none" {
+            return Ok(Self(None));
+        }
+        s.parse()
+            .map(|color| Self(Some(color)))
+            .map_err(|error: konectl::ParseRgbError| format!("{error}, or none"))
+    }
+}
 
 #[derive(Debug, Args)]
 struct ProfileArg {
@@ -349,7 +404,7 @@ fn main() -> Result<()> {
             }
         };
     }
-    let manager: Manager = Manager::new().context("failed to initialise HID access")?;
+    let mut manager: Manager = Manager::new().context("failed to initialise HID access")?;
 
     match cli.command {
         #[cfg(target_os = "linux")]
@@ -391,16 +446,79 @@ fn main() -> Result<()> {
             };
             println!("{:<16}{energy_saving}", "energy saving");
         }
-        Command::Profile { profile: None } => {
+        Command::Profile {
+            profile: None,
+            action: None,
+        } => list_profiles(&mut open(&manager)?)?,
+        Command::Profile {
+            profile: None,
+            action: Some(action),
+        } => {
             let mut mouse = open(&manager)?;
-            let active: u8 = mouse.active_profile()?;
-            for profile in mouse.profiles()? {
-                let note: &str = if profile == active { "  (active)" } else { "" };
-                println!("profile {profile}{note}");
+            // Checked before the safety backup, so a refused change keeps the
+            // previous backup.
+            let profiles: Vec<u8> = mouse.profiles()?;
+            let in_use = |profile: u8| -> Result<()> {
+                if profiles.contains(&profile) {
+                    Ok(())
+                } else {
+                    Err(konectl::Error::UnusedProfile(profile).into())
+                }
+            };
+            match action {
+                ProfileAction::Add { copy_from } => {
+                    let source: u8 = match copy_from {
+                        Some(profile) => profile,
+                        None => mouse.active_profile()?,
+                    };
+                    in_use(source)?;
+                    if profiles.len() == usize::from(PROFILE_COUNT) {
+                        bail!("all {PROFILE_COUNT} profile slots are in use");
+                    }
+                    save_safety_backups(&mut mouse)?;
+                    let added: u8 = mouse.add_profile(source).context(undo_hint()?)?;
+                    println!("added profile {added}, a copy of profile {source}");
+                }
+                ProfileAction::Remove { profile } => {
+                    in_use(profile)?;
+                    if profiles.len() == 1 {
+                        bail!("profile {profile} is the only profile");
+                    }
+                    if mouse.active_profile()? == profile {
+                        bail!("profile {profile} is active: activate another profile first");
+                    }
+                    save_safety_backups(&mut mouse)?;
+                    let disabled: usize = mouse.remove_profile(profile).context(undo_hint()?)?;
+                    if profiles.iter().any(|&number| number > profile) {
+                        println!(
+                            "removed profile {profile}; the profiles after it moved down one slot"
+                        );
+                    } else {
+                        println!("removed profile {profile}");
+                    }
+                    if disabled > 0 {
+                        println!(
+                            "{disabled} button functions switched to profile {profile} and are \
+                             now disabled"
+                        );
+                    }
+                }
+                ProfileAction::Color { profile, color } => {
+                    in_use(profile)?;
+                    let entry = mouse.profile_table()?[usize::from(profile - 1)];
+                    if profile_color(&entry) == color.0 {
+                        println!("unchanged");
+                    } else {
+                        save_safety_backups(&mut mouse)?;
+                        mouse.set_profile_color(profile, color.0)?;
+                    }
+                }
             }
+            list_profiles(&mut mouse)?;
         }
         Command::Profile {
             profile: Some(profile),
+            ..
         } => {
             let mut mouse = open(&manager)?;
             if !mouse.profiles()?.contains(&profile) {
@@ -592,6 +710,31 @@ fn main() -> Result<()> {
             }
             print_buttons(&buttons, active_profile)?;
         }
+        Command::Reset { yes } => {
+            let mut mouse = open(&manager)?;
+            // Reports a sleeping or switched-off mouse before asking.
+            mouse.info()?;
+            if !yes
+                && !confirm(
+                    "Reset the mouse to its factory settings? Profiles, buttons and lighting \
+                     are replaced.",
+                )?
+            {
+                println!("cancelled");
+                return Ok(());
+            }
+            save_safety_backups(&mut mouse)?;
+            mouse.reset()?;
+            println!(
+                "the mouse is back at its factory settings (the same profile slots, energy saving on)"
+            );
+            println!(
+                "to undo: konectl restore {} (energy saving and the lift-off calibration are \
+                 not in it)",
+                safety_backup_path("previous.txt")?.display()
+            );
+        }
+        Command::Pair { yes } => pair(&mut manager, yes)?,
         Command::Backup { file } => {
             let backup: Backup = open(&manager)?.backup()?;
             fs::write(&file, backup.to_text())
@@ -612,12 +755,29 @@ fn main() -> Result<()> {
                 .check_backup(&backup)
                 .with_context(|| format!("could not use {}", file.display()))?;
             save_safety_backups(&mut mouse)?;
+            let before: Vec<u8> = mouse.profiles()?;
             mouse.restore(&backup)?;
             println!(
                 "restored {} profiles from {}",
                 backup.profiles.len(),
                 file.display()
             );
+            let removed: Vec<String> = before
+                .iter()
+                .filter(|number| {
+                    !backup
+                        .profiles
+                        .iter()
+                        .any(|profile| profile.settings.profile() == **number)
+                })
+                .map(u8::to_string)
+                .collect();
+            if !removed.is_empty() {
+                println!(
+                    "removed profile {}, which the backup does not have",
+                    removed.join(", ")
+                );
+            }
             let without_buttons: usize = backup
                 .profiles
                 .iter()
@@ -672,13 +832,140 @@ fn list(manager: &Manager) -> Result<()> {
 }
 
 fn open(manager: &Manager) -> Result<KoneProAir<HidTransport>> {
-    match manager.open_first() {
-        Ok(mouse) => Ok(mouse),
-        Err(error @ konectl::Error::Hid(_)) => Err(anyhow::Error::new(error).context(
+    manager.open_first().map_err(open_error)
+}
+
+/// Adds a hint to errors from opening the mouse.
+fn open_error(error: konectl::Error) -> anyhow::Error {
+    match error {
+        konectl::Error::Hid(_) => anyhow::Error::new(error).context(
             "could not open the mouse (no access to /dev/hidraw*?): run `konectl udev install`, or use sudo",
-        )),
-        Err(error) => Err(error.into()),
+        ),
+        error => error.into(),
     }
+}
+
+/// How long `konectl pair` waits for each step of the dongle's replug.
+const PAIRING_REPLUG_WAIT: Duration = Duration::from_secs(180);
+/// How long it then waits for the mouse to answer through the dongle.
+const PAIRING_CONNECT_WAIT: Duration = Duration::from_secs(15);
+
+/// Puts the dongle into pairing mode, shows the steps, waits until the dongle
+/// was plugged in again and checks that the mouse answers through it.
+fn pair(manager: &mut Manager, yes: bool) -> Result<()> {
+    let mut dongle = match manager.open_mode(ConnectionMode::Wireless) {
+        Err(konectl::Error::NotFound) => bail!("pairing needs the dongle: plug it in"),
+        opened => opened.map_err(open_error)?,
+    };
+    println!("Pairing connects the mouse to this dongle.");
+    if !yes && !confirm("Start pairing?")? {
+        println!("cancelled");
+        return Ok(());
+    }
+    dongle.start_pairing()?;
+    println!("The dongle is waiting for the mouse. Now:");
+    println!("  1. Unplug the USB cable from the mouse and switch the mouse on.");
+    println!("  2. Hold the profile button (button 8) for 3 seconds.");
+    println!("  3. When the lighting effect has finished, unplug the dongle and plug it in again.");
+    println!("Waiting for the dongle to be plugged in again …");
+    let not_replugged = "the dongle stays in pairing mode until it is plugged in again";
+    // The opened dongle stops working once it is unplugged, however quickly it
+    // comes back.
+    let deadline: Instant = Instant::now() + PAIRING_REPLUG_WAIT;
+    while dongle.is_present() {
+        if Instant::now() >= deadline {
+            return Err(anyhow::anyhow!(
+                "the dongle was not unplugged within {} seconds",
+                PAIRING_REPLUG_WAIT.as_secs()
+            ))
+            .context(not_replugged);
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    drop(dongle);
+    wait_for_dongle(manager).context(not_replugged)?;
+
+    // The mouse needs a moment to connect, and the new device node to get
+    // its permissions.
+    let deadline: Instant = Instant::now() + PAIRING_CONNECT_WAIT;
+    loop {
+        let answered = manager
+            .open_mode(ConnectionMode::Wireless)
+            .and_then(|mut mouse| mouse.info());
+        match answered {
+            Ok(_) => {
+                println!("paired: the mouse answers through the dongle");
+                return Ok(());
+            }
+            Err(error) if Instant::now() >= deadline => {
+                return Err(open_error(error)).context(
+                    "the mouse does not answer through the dongle: move it, or pair again",
+                );
+            }
+            Err(_) => thread::sleep(Duration::from_millis(500)),
+        }
+    }
+}
+
+/// Waits until a dongle is connected.
+fn wait_for_dongle(manager: &mut Manager) -> Result<()> {
+    let deadline: Instant = Instant::now() + PAIRING_REPLUG_WAIT;
+    while Instant::now() < deadline {
+        manager.refresh()?;
+        if manager
+            .devices()
+            .iter()
+            .any(|device| device.mode == ConnectionMode::Wireless)
+        {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(300));
+    }
+    bail!(
+        "the dongle was not plugged in again within {} seconds",
+        PAIRING_REPLUG_WAIT.as_secs()
+    )
+}
+
+/// How to undo a change that failed halfway.
+fn undo_hint() -> Result<String> {
+    Ok(format!(
+        "to go back to the settings before this command: konectl restore {}",
+        safety_backup_path("previous.txt")?.display()
+    ))
+}
+
+/// Lists the profiles in use with their colours.
+fn list_profiles(mouse: &mut KoneProAir<HidTransport>) -> Result<()> {
+    let active: u8 = mouse.active_profile()?;
+    for (profile, entry) in (1u8..).zip(mouse.profile_table()?) {
+        if !profile_in_use(&entry) {
+            continue;
+        }
+        let color: String =
+            profile_color(&entry).map_or_else(String::new, |color| format!("  colour {color}"));
+        let note: &str = if profile == active { "  (active)" } else { "" };
+        println!("profile {profile}{color}{note}");
+    }
+    Ok(())
+}
+
+/// Asks a yes/no question on the terminal; only `y` or `yes` count as yes.
+fn confirm(question: &str) -> Result<bool> {
+    if !io::stdin().is_terminal() {
+        bail!("this needs a confirmation: run it in a terminal, or pass --yes");
+    }
+    // On stderr, so it is seen even when the output is redirected.
+    eprint!("{question} [y/N] ");
+    io::stderr().flush()?;
+    let mut answer: String = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .context("could not read from the terminal")?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 /// Seconds the mouse has to be moved during the lift-off calibration (the
@@ -833,6 +1120,11 @@ fn with_original_buttons(original: &Backup, current: &Backup) -> Option<Backup> 
         }
     }
     added.then_some(completed)
+}
+
+/// Path of a safety backup file, e.g. `previous.txt`.
+fn safety_backup_path(name: &str) -> Result<PathBuf> {
+    Ok(state_directory(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))?.join(name))
 }
 
 /// `$XDG_STATE_HOME/konectl`, or `$HOME/.local/state/konectl`.
@@ -1162,6 +1454,26 @@ profile 1 lighting 01 64 64 46 04 00 ff 00 00 ff 64
         );
         assert_eq!(completed.dongle_firmware, original.dongle_firmware);
         assert!(with_original_buttons(&completed, &current).is_none());
+    }
+
+    #[test]
+    fn parses_profile_reset_and_pair_commands() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).map(|_| ());
+        assert!(parse(&["konectl", "profile"]).is_ok());
+        assert!(parse(&["konectl", "profile", "2"]).is_ok());
+        assert!(parse(&["konectl", "profile", "6"]).is_err());
+        assert!(parse(&["konectl", "profile", "add"]).is_ok());
+        assert!(parse(&["konectl", "profile", "add", "--copy-from", "2"]).is_ok());
+        assert!(parse(&["konectl", "profile", "remove", "3"]).is_ok());
+        assert!(parse(&["konectl", "profile", "remove"]).is_err());
+        assert!(parse(&["konectl", "profile", "color", "2", "f40000"]).is_ok());
+        assert!(parse(&["konectl", "profile", "color", "2", "none"]).is_ok());
+        assert!(parse(&["konectl", "profile", "color", "2", "reddish"]).is_err());
+        assert!(parse(&["konectl", "profile", "2", "add"]).is_err());
+        assert!(parse(&["konectl", "reset"]).is_ok());
+        assert!(parse(&["konectl", "reset", "--yes"]).is_ok());
+        assert!(parse(&["konectl", "pair", "--yes"]).is_ok());
+        assert_eq!("none".parse::<ProfileColor>(), Ok(ProfileColor(None)));
     }
 
     #[test]
