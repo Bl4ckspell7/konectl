@@ -244,6 +244,8 @@ Functions:
   mute, volume-up, volume-down, play-pause, stop, next-track, previous-track,
   browser-search, browser-stop, browser-refresh,
   consumer:0x0223 (any HID consumer usage)
+  system:sleep, system:wake, system:shut-down   power the computer down,
+                 put it to sleep or wake it
   dpi-cycle, dpi-up, dpi-down, profile-cycle, profile-next, profile-previous,
   profile:N      switch to profile N (1-3)
   easy-shift     hold for the Easy-Shift layer
@@ -452,10 +454,21 @@ fn main() -> Result<()> {
         Command::Udev { .. } => unreachable!("handled above"),
         Command::List => list(&manager)?,
         Command::Battery => match open(&manager)?.battery() {
-            Ok(battery) => match battery.percent() {
-                Some(percent) => println!("{percent}%"),
-                None => println!("unknown (raw {})", battery.raw),
-            },
+            Ok(battery) => {
+                let level: String = battery.percent().map_or_else(
+                    || format!("unknown (raw {})", battery.raw),
+                    |p| format!("{p}%"),
+                );
+                let state: &str = match (battery.charging, battery.cable_power) {
+                    (true, _) => " (charging)",
+                    (false, true) if battery.percent() == Some(100) => {
+                        " (on the cable, fully charged)"
+                    }
+                    (false, true) => " (on the cable)",
+                    (false, false) => "",
+                };
+                println!("{level}{state}");
+            }
             Err(konectl::Error::Rejected { .. }) => {
                 println!("unknown (the mouse is asleep, switched off or out of range)");
             }
@@ -1330,7 +1343,6 @@ fn print_buttons(buttons: &Buttons, active_profile: u8) -> Result<()> {
     println!("profile {profile}{active_note}");
     println!("{:<16}{:<26}easy-shift", "button", "standard");
     let mut swarm_functions: bool = false;
-    let mut system_functions: bool = false;
     let mut macros: bool = false;
     for (button, name) in (1u8..).zip(BUTTON_NAMES) {
         let standard: ButtonAction = buttons.action(button, Layer::Standard)?;
@@ -1342,7 +1354,6 @@ fn print_buttons(buttons: &Buttons, active_profile: u8) -> Result<()> {
         for action in [Some(standard), easy_shift].into_iter().flatten() {
             match action {
                 ButtonAction::Host(HostFunction::Swarm(_)) => swarm_functions = true,
-                ButtonAction::Host(HostFunction::System(_)) => system_functions = true,
                 ButtonAction::Macro(_) => macros = true,
                 _ => {}
             }
@@ -1356,9 +1367,6 @@ fn print_buttons(buttons: &Buttons, active_profile: u8) -> Result<()> {
     }
     if swarm_functions {
         println!("(swarm:… functions only work while the official software runs)");
-    }
-    if system_functions {
-        println!("(whether system:… functions work without the official software is untested)");
     }
     if macros {
         println!("(the mouse cannot report which keys a macro plays)");

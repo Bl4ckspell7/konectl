@@ -33,7 +33,7 @@ pub mod settings;
 mod transport;
 
 pub use backup::{Backup, ProfileBackup};
-pub use buttons::{ButtonAction, Buttons, Layer, MacroMode};
+pub use buttons::{ButtonAction, Buttons, Layer, MacroMode, SystemControl};
 pub use color::{ParseRgbError, Rgb};
 pub use device::{ConnectionMode, DeviceInfo, KoneProAir, Manager, RemovedProfile};
 pub use error::{Error, Result};
