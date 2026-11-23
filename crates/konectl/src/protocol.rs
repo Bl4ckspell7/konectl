@@ -13,6 +13,7 @@
 
 use crate::buttons::{Buttons, ENTRIES_LEN, FUNCTIONS_LEN, Layer};
 use crate::color::Rgb;
+use crate::macros::MACRO_CHUNK_LEN;
 use crate::settings::{
     Firmware, Info, LIGHTING_LEN, Lighting, PROFILE_COUNT, PROFILE_ENTRY_LEN, ProfileEntry,
     SENSOR_LEN, Sensor, UNUSED_PROFILE_ENTRY,
@@ -54,6 +55,12 @@ const CMD_LIFT_OFF_CALIBRATION: u8 = 0x08;
 const CMD_LIFT_OFF_CALIBRATION_APPLY: u8 = 0x15;
 const CMD_ENERGY_SAVING: u8 = 0x72;
 const CMD_PAIRING: u8 = 0x09;
+/// Macro record writes: `10 <0x1f + number> 3c <chunk>`.
+const CMD_MACRO_BASE: u8 = 0x1f;
+const CMD_MACRO_COMMIT: u8 = 0x60;
+/// Bytes the official software sends before the macro number in the commit
+/// (`0x2c92`, the cable's product ID, also over the dongle's info answer).
+const MACRO_COMMIT_KEY: [u8; 5] = [0x92, 0x2c, 0x00, 0x00, 0x00];
 const CMD_RESET: u8 = 0x62;
 
 /// Payload the official software sends with the reset command; its meaning is
@@ -201,6 +208,41 @@ pub fn clear_profile_entry(profile: u8) -> Report {
 /// 1.5 seconds.
 pub fn reset() -> Report {
     request(OP_WRITE, CMD_RESET, 0, &RESET_KEY)
+}
+
+/// Writes chunk `chunk` of the record of macro `number` (1–12); see
+/// [`Macro`](crate::Macro). Macros are shared by all profiles; the official
+/// software sends them after the blocks of the profile that assigns them.
+///
+/// # Panics
+/// If `number` is not 1–12.
+pub fn write_macro_chunk(number: u8, chunk: u8, data: &[u8; MACRO_CHUNK_LEN]) -> Report {
+    assert!(
+        (1..=12).contains(&number),
+        "macro number {number} is not 1-12"
+    );
+    request(OP_WRITE, CMD_MACRO_BASE + number, chunk, data)
+}
+
+/// `true` if `report` is a [`commit_macro`] request.
+pub(crate) fn is_macro_commit(report: &Report) -> bool {
+    report[..2] == [OP_WRITE, CMD_MACRO_COMMIT]
+}
+
+/// Completes the record of macro `number` (1–12), after its chunks. The
+/// mouse answers after about 200 ms.
+///
+/// # Panics
+/// If `number` is not 1–12.
+pub fn commit_macro(number: u8) -> Report {
+    assert!(
+        (1..=12).contains(&number),
+        "macro number {number} is not 1-12"
+    );
+    let mut payload: [u8; 6] = [0; 6];
+    payload[..5].copy_from_slice(&MACRO_COMMIT_KEY);
+    payload[5] = number;
+    request(OP_WRITE, CMD_MACRO_COMMIT, 0, &payload)
 }
 
 /// Puts the dongle into pairing mode (sent to the dongle; the mouse is then
@@ -829,6 +871,23 @@ pub(crate) mod tests {
         assert_eq!(
             start_pairing(),
             report_with_prefix(&[0x10, 0x09, 0x01, 0x00, 0x01])
+        );
+    }
+
+    #[test]
+    fn macro_requests_match_captures() {
+        // Capture 72: macro 3 is written with 10 22, macro 4 with 10 23.
+        let mut chunk: [u8; MACRO_CHUNK_LEN] = [0; MACRO_CHUNK_LEN];
+        chunk[..4].copy_from_slice(&[0x03, 0x09, 0x04, 0x38]);
+        let report = write_macro_chunk(3, 1, &chunk);
+        assert_eq!(
+            report[..8],
+            [0x10, 0x22, 0x3c, 0x01, 0x03, 0x09, 0x04, 0x38]
+        );
+        assert_eq!(write_macro_chunk(10, 0, &chunk)[1], 0x29);
+        assert_eq!(
+            commit_macro(4),
+            report_with_prefix(&[0x10, 0x60, 0x06, 0x00, 0x92, 0x2c, 0x00, 0x00, 0x00, 0x04])
         );
     }
 

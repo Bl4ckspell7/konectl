@@ -27,6 +27,14 @@ pub(crate) const ENTRIES_LEN: usize = 24;
 const ENTRY_LEN: usize = 3;
 /// Block 2 holds the standard layer's codes at 0–7, the Easy-Shift layer's at 8–15.
 const EASY_SHIFT_CODES: usize = 8;
+/// Block 2 bytes 16–27: how macros 1–12 are played ([`MacroMode`]).
+const MACRO_MODES: usize = 16;
+/// Function codes 1–12 play the macro with that number.
+const MACRO_NUMBERS: std::ops::RangeInclusive<u8> = 1..=12;
+/// Slots (0-based) that can play a macro, in both layers: buttons 1, 2, 3, 7, 6.
+const MACRO_SLOTS: usize = 5;
+/// Easy-Shift slot `s` plays macro `s + 1 + EASY_SHIFT_MACROS`.
+const EASY_SHIFT_MACROS: u8 = 6;
 
 /// Function code: the button sends what its entry says.
 const CODE_ENTRY: u8 = 0x40;
@@ -113,10 +121,38 @@ impl Buttons {
         let entries: &[u8; ENTRIES_LEN] = self.entries(layer);
         let mut entry: [u8; ENTRY_LEN] = ZERO_ENTRY;
         entry.copy_from_slice(&entries[slot * ENTRY_LEN..(slot + 1) * ENTRY_LEN]);
-        Ok(ButtonAction::decode(
-            self.functions[code_index(slot, layer)],
-            entry,
-        ))
+        let code: u8 = self.functions[code_index(slot, layer)];
+        if Self::macro_number(button, layer)? == Some(code) && entry == ZERO_ENTRY {
+            let mode: u8 = self.functions[MACRO_MODES + usize::from(code - 1)];
+            return Ok(ButtonAction::Macro(MacroMode::from_byte(mode)));
+        }
+        Ok(ButtonAction::decode(code, entry))
+    }
+
+    /// Number (1–12) of the macro `button` plays in `layer`, if it can play
+    /// one: buttons 1, 2, 3, 6 and 7 in both layers (not the wheel and not
+    /// button 8). The macros themselves are shared by all profiles.
+    pub fn macro_number(button: u8, layer: Layer) -> Result<Option<u8>> {
+        let slot: usize = slot(button)?;
+        if slot >= MACRO_SLOTS {
+            return Ok(None);
+        }
+        // slot < 5, so the cast cannot truncate.
+        let number: u8 = slot as u8 + 1;
+        Ok(Some(match layer {
+            Layer::Standard => number,
+            Layer::EasyShift => number + EASY_SHIFT_MACROS,
+        }))
+    }
+
+    /// The buttons and layers that play a macro.
+    pub fn macro_buttons(&self) -> Vec<(u8, Layer)> {
+        (1..=BUTTON_COUNT)
+            .flat_map(|button| [(button, Layer::Standard), (button, Layer::EasyShift)])
+            .filter(|&(button, layer)| {
+                matches!(self.action(button, layer), Ok(ButtonAction::Macro(_)))
+            })
+            .collect()
     }
 
     /// `false` where the official software offers no Easy-Shift function: on
@@ -137,11 +173,23 @@ impl Buttons {
     ///   button has no function in it (setting Easy-Shift disables it).
     ///
     /// [`ButtonAction::Host`], [`ButtonAction::FactoryDefault`] and
-    /// [`ButtonAction::Other`] cannot be set.
+    /// [`ButtonAction::Other`] cannot be set. [`ButtonAction::Macro`] only
+    /// assigns the macro; its keys are written with
+    /// [`KoneProAir::write_macro`](crate::KoneProAir::write_macro) (written
+    /// with [`KoneProAir::write_buttons`](crate::KoneProAir::write_buttons)
+    /// instead, the button plays whatever the mouse has stored under the
+    /// macro's number). Right click (`menu`) has to stay on at least one
+    /// button, as in the official software.
     pub fn set_action(&mut self, button: u8, layer: Layer, action: ButtonAction) -> Result<()> {
         let slot: usize = slot(button)?;
         action.check()?;
         let refuse = |reason: String| Err(Error::InvalidValue(reason));
+        if matches!(action, ButtonAction::Macro(_)) && Self::macro_number(button, layer)?.is_none()
+        {
+            return refuse(format!(
+                "button {button} cannot play a macro (only buttons 1, 2, 3, 6 and 7 can)"
+            ));
+        }
         if (button == WHEEL_UP || button == WHEEL_DOWN) && action.needs_holding() {
             return refuse(format!(
                 "button {button} is the wheel, which cannot be held: {action} needs a button"
@@ -169,6 +217,19 @@ impl Buttons {
                 if action == ButtonAction::Special(Special::EasyShift) {
                     return refuse("Easy-Shift cannot be set in the Easy-Shift layer".to_owned());
                 }
+            }
+        }
+
+        let menu = ButtonAction::Mouse(MouseFunction::Menu);
+        if layer == Layer::Standard && action != menu && self.action(button, layer)? == menu {
+            let menu_elsewhere: bool = (1..=BUTTON_COUNT)
+                .filter(|&other| other != button)
+                .any(|other| self.action(other, Layer::Standard).ok() == Some(menu));
+            if !menu_elsewhere {
+                return refuse(format!(
+                    "button {button} has the only right click (menu); give another button \
+                     menu first"
+                ));
             }
         }
 
@@ -210,7 +271,24 @@ impl Buttons {
     }
 
     fn store(&mut self, slot: usize, layer: Layer, action: ButtonAction) {
-        let (code, entry): (u8, [u8; ENTRY_LEN]) = action.encode();
+        // A macro that is no longer played gets mode 0, as the official
+        // software does.
+        let old: u8 = self.functions[code_index(slot, layer)];
+        if MACRO_NUMBERS.contains(&old) {
+            self.functions[MACRO_MODES + usize::from(old - 1)] = 0;
+        }
+        let (code, entry): (u8, [u8; ENTRY_LEN]) = match action {
+            ButtonAction::Macro(mode) => {
+                // Checked by set_action: the slot can play a macro.
+                let number: u8 = match layer {
+                    Layer::Standard => slot as u8 + 1,
+                    Layer::EasyShift => slot as u8 + 1 + EASY_SHIFT_MACROS,
+                };
+                self.functions[MACRO_MODES + usize::from(number - 1)] = mode.byte();
+                (number, ZERO_ENTRY)
+            }
+            action => action.encode(),
+        };
         self.functions[code_index(slot, layer)] = code;
         let entries: &mut [u8; ENTRIES_LEN] = match layer {
             Layer::Standard => &mut self.standard,
@@ -257,6 +335,9 @@ pub enum ButtonAction {
     /// A function the official software carries out on the computer (open a
     /// program, lock the screen, …); the mouse only reports the press.
     Host(HostFunction),
+    /// A macro the mouse plays by itself, and how; its keys cannot be read
+    /// back from the mouse.
+    Macro(MacroMode),
     /// The function the firmware gives the button after a factory reset
     /// (stored as `ff ff ff ff`).
     FactoryDefault,
@@ -324,6 +405,7 @@ impl ButtonAction {
             Self::Host(HostFunction::Swarm(id)) => (CODE_ENTRY, [ENTRY_SWARM, id, 0]),
             Self::FactoryDefault => (FACTORY_DEFAULT, [FACTORY_DEFAULT; ENTRY_LEN]),
             Self::Other { code, entry } => (code, entry),
+            Self::Macro(_) => unreachable!("Buttons::store encodes macros with their number"),
         }
     }
 
@@ -359,6 +441,7 @@ impl ButtonAction {
                 "{self} is carried out by the official software, not by the mouse; konectl does \
                  not set it"
             )),
+            Self::Macro(mode) => mode.check(),
             Self::FactoryDefault | Self::Other { .. } => invalid(format!("{self} cannot be set")),
         }
     }
@@ -407,6 +490,7 @@ impl fmt::Display for ButtonAction {
             Self::Special(special) => special.to_string(),
             Self::EasyAim(dpi) => format!("easy-aim:{dpi}"),
             Self::Host(function) => function.to_string(),
+            Self::Macro(mode) => mode.to_string(),
             Self::FactoryDefault => "factory-default".to_owned(),
             Self::Other { code, entry } => format!(
                 "unknown ({code:02x} {:02x} {:02x} {:02x})",
@@ -423,8 +507,14 @@ impl FromStr for ButtonAction {
     /// Parses the names [`ButtonAction`]'s `Display` writes: `disabled`, a
     /// mouse function (`click`, `back`, …), `key:ctrl+c`, a consumer control
     /// (`volume-up`, `consumer:0x0223`), a special function (`dpi-up`,
-    /// `profile:2`, …) or `easy-aim:<dpi>`.
+    /// `profile:2`, …) or `easy-aim:<dpi>`. Macros are not parsed here: they
+    /// need their keys ([`Macro`](crate::Macro)).
     fn from_str(s: &str) -> Result<Self> {
+        if s.starts_with("macro") {
+            return Err(Error::InvalidValue(format!(
+                "{s:?}: a macro needs its keys, e.g. 'macro:ctrl+c, 50ms, ctrl+v'"
+            )));
+        }
         let unknown = || {
             Error::InvalidValue(format!(
                 "unknown button function {s:?}; see `konectl button --help` for the list"
@@ -719,8 +809,73 @@ pub struct Key {
     pub usage: u8,
 }
 
+/// How the mouse plays a macro (block 2 bytes 16–27).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MacroMode {
+    /// Once per press, or `repeat` times (1–99).
+    OnPress { repeat: u8 },
+    /// Over and over while the button is held.
+    WhilePressed,
+    /// Starts on a press and stops on the next one.
+    Toggle,
+    /// A value konectl does not know.
+    Other(u8),
+}
+
+/// Highest repeat count the official software offers.
+pub const MACRO_REPEAT_MAX: u8 = 99;
+const MODE_WHILE_PRESSED: u8 = 0xfd;
+const MODE_TOGGLE: u8 = 0xfe;
+
+impl MacroMode {
+    fn from_byte(byte: u8) -> Self {
+        match byte {
+            MODE_WHILE_PRESSED => Self::WhilePressed,
+            MODE_TOGGLE => Self::Toggle,
+            1..=MACRO_REPEAT_MAX => Self::OnPress { repeat: byte },
+            other => Self::Other(other),
+        }
+    }
+
+    fn byte(self) -> u8 {
+        match self {
+            Self::OnPress { repeat } => repeat,
+            Self::WhilePressed => MODE_WHILE_PRESSED,
+            Self::Toggle => MODE_TOGGLE,
+            Self::Other(byte) => byte,
+        }
+    }
+
+    fn check(self) -> Result<()> {
+        match self {
+            Self::OnPress { repeat } if !(1..=MACRO_REPEAT_MAX).contains(&repeat) => {
+                Err(Error::InvalidValue(format!(
+                    "invalid repeat count {repeat}: use 1 to {MACRO_REPEAT_MAX}"
+                )))
+            }
+            Self::Other(byte) => Err(Error::InvalidValue(format!(
+                "unknown macro mode {byte:#04x} cannot be set"
+            ))),
+            _ => Ok(()),
+        }
+    }
+}
+
+impl fmt::Display for MacroMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text: String = match self {
+            Self::OnPress { repeat: 1 } => "macro".to_owned(),
+            Self::OnPress { repeat } => format!("macro (repeat {repeat})"),
+            Self::WhilePressed => "macro (while pressed)".to_owned(),
+            Self::Toggle => "macro (toggle)".to_owned(),
+            Self::Other(byte) => format!("macro (mode {byte:#04x})"),
+        };
+        f.pad(&text)
+    }
+}
+
 /// Modifier bits and names, in the order they are written.
-const MODIFIERS: [(u8, &str); 8] = [
+pub(crate) const MODIFIERS: [(u8, &str); 8] = [
     (0x01, "ctrl"),
     (0x02, "shift"),
     (0x04, "alt"),
@@ -782,7 +937,7 @@ const NAMED_KEYS: [(u8, &str); 41] = [
 ];
 
 impl Key {
-    fn check(self) -> Result<()> {
+    pub(crate) fn check(self) -> Result<()> {
         let invalid = |message: String| Err(Error::InvalidValue(message));
         if self.modifiers == 0 && self.usage == 0 {
             return invalid("a key needs a key or a modifier".to_owned());
@@ -1251,6 +1406,149 @@ pub(crate) mod tests {
         assert_eq!(shown(3, Layer::Standard), "profile:1");
         assert_eq!(shown(7, Layer::EasyShift), "disabled");
         assert_eq!(start_buttons().renumber_profiles(1), (0, 0));
+    }
+
+    #[test]
+    fn macros_match_the_captures() {
+        // Captures 72–75: macros on buttons 3 and 7 and on Easy-Shift 1, 2 and 7.
+        let mut buttons = start_buttons();
+        let on_press = ButtonAction::Macro(MacroMode::OnPress { repeat: 1 });
+        for (button, layer) in [
+            (3, Layer::Standard),
+            (7, Layer::Standard),
+            (1, Layer::EasyShift),
+            (2, Layer::EasyShift),
+            (7, Layer::EasyShift),
+        ] {
+            buttons
+                .set_action(button, layer, on_press)
+                .expect("allowed");
+        }
+        assert_eq!(
+            buttons.functions()[..28],
+            [
+                0x40, 0x40, 0x03, 0x04, 0x45, 0x46, 0x40, 0x40, 0x07, 0x08, 0x40, 0x0a, 0x00, 0x00,
+                0x40, 0x40, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x01, 0x00, 0x01, 0x00, 0x00
+            ]
+        );
+        assert_eq!(buttons.entries(Layer::Standard)[6..12], [0; 6]);
+        assert_eq!(
+            buttons.action(7, Layer::Standard).expect("button"),
+            on_press
+        );
+        assert_eq!(buttons.macro_buttons().len(), 5);
+        // Modes (captures 69–71): toggle fe, while pressed fd, repeat 3.
+        for (mode, byte, shown) in [
+            (MacroMode::Toggle, 0xfe, "macro (toggle)"),
+            (MacroMode::WhilePressed, 0xfd, "macro (while pressed)"),
+            (MacroMode::OnPress { repeat: 3 }, 0x03, "macro (repeat 3)"),
+        ] {
+            buttons
+                .set_action(7, Layer::Standard, ButtonAction::Macro(mode))
+                .expect("allowed");
+            assert_eq!(buttons.functions()[19], byte);
+            assert_eq!(
+                buttons
+                    .action(7, Layer::Standard)
+                    .expect("button")
+                    .to_string(),
+                shown
+            );
+        }
+        // Capture 76: another function clears the macro's mode.
+        buttons
+            .set_action(
+                3,
+                Layer::Standard,
+                ButtonAction::Mouse(MouseFunction::UniversalScroll),
+            )
+            .expect("allowed");
+        assert_eq!(buttons.functions()[2], 0x40);
+        assert_eq!(buttons.functions()[18], 0x00);
+    }
+
+    #[test]
+    fn right_click_stays_on_a_button() {
+        let mut buttons = start_buttons();
+        let back = ButtonAction::Mouse(MouseFunction::Back);
+        assert!(buttons.set_action(2, Layer::Standard, back).is_err());
+        // Capture 77: menu on button 3 first, then button 2 can change.
+        buttons
+            .set_action(3, Layer::Standard, ButtonAction::Mouse(MouseFunction::Menu))
+            .expect("allowed");
+        buttons
+            .set_action(2, Layer::Standard, back)
+            .expect("allowed");
+        assert!(buttons.set_action(3, Layer::Standard, back).is_err());
+        assert!("macro".parse::<ButtonAction>().is_err());
+        // After a factory reset no button reads as menu; changes still work.
+        let mut reset = Buttons::from_blocks(1, [0xff; FUNCTIONS_LEN], [0xff; 24], [0xff; 24]);
+        reset.set_action(3, Layer::Standard, back).expect("allowed");
+    }
+
+    #[test]
+    fn macro_numbers_match_the_captures() {
+        // Captures 72-78: numbers 2, 3, 4, 5 (standard) and 7-11 (Easy-Shift).
+        for (button, standard, easy_shift) in
+            [(1, 1, 7), (2, 2, 8), (3, 3, 9), (7, 4, 10), (6, 5, 11)]
+        {
+            assert_eq!(
+                Buttons::macro_number(button, Layer::Standard).expect("button"),
+                Some(standard)
+            );
+            assert_eq!(
+                Buttons::macro_number(button, Layer::EasyShift).expect("button"),
+                Some(easy_shift)
+            );
+        }
+        // A macro code on another button is not its macro.
+        let mut buttons = start_buttons();
+        buttons.functions[3] = 0x06;
+        assert!(matches!(
+            buttons.action(7, Layer::Standard).expect("button"),
+            ButtonAction::Other { code: 0x06, .. }
+        ));
+    }
+
+    #[test]
+    fn only_some_buttons_play_macros() {
+        let mut buttons = start_buttons();
+        let on_press = ButtonAction::Macro(MacroMode::OnPress { repeat: 1 });
+        for (button, layer) in [
+            (1, Layer::Standard),
+            (4, Layer::Standard),
+            (5, Layer::EasyShift),
+            (8, Layer::Standard),
+            (6, Layer::EasyShift),
+        ] {
+            assert!(
+                buttons.set_action(button, layer, on_press).is_err(),
+                "{button}"
+            );
+        }
+        for repeat in [0, 100] {
+            assert!(
+                buttons
+                    .set_action(
+                        7,
+                        Layer::Standard,
+                        ButtonAction::Macro(MacroMode::OnPress { repeat })
+                    )
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            Buttons::macro_number(6, Layer::Standard).expect("button"),
+            Some(5)
+        );
+        assert_eq!(
+            Buttons::macro_number(6, Layer::EasyShift).expect("button"),
+            Some(11)
+        );
+        assert_eq!(
+            Buttons::macro_number(8, Layer::Standard).expect("button"),
+            None
+        );
     }
 
     #[test]

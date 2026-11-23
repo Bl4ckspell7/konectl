@@ -7,9 +7,10 @@ use std::time::{Duration, Instant};
 use hidapi::HidApi;
 
 use crate::backup::{Backup, ProfileBackup};
-use crate::buttons::{Buttons, Layer};
+use crate::buttons::{ButtonAction, Buttons, Layer};
 use crate::color::Rgb;
 use crate::error::{Error, Result};
+use crate::macros::Macro;
 use crate::protocol::{self, Battery, Report, Signal, Status};
 use crate::settings::{
     Effect, Firmware, Info, Lighting, PROFILE_COUNT, ProfileEntry, ProfileSettings, Sensor,
@@ -39,6 +40,13 @@ const RESET_DEADLINE: Duration = if cfg!(test) {
     Duration::from_millis(30)
 } else {
     Duration::from_secs(5)
+};
+/// How long the macro commit waits for its answer (about 200 ms in the
+/// captures). It is not repeated: what a second commit does is not known.
+const MACRO_COMMIT_DEADLINE: Duration = if cfg!(test) {
+    Duration::from_millis(30)
+} else {
+    Duration::from_secs(2)
 };
 /// How long a request waits for its answer.
 const REPLY_DEADLINE: Duration = if cfg!(test) {
@@ -426,6 +434,7 @@ impl<T: Transport> KoneProAir<T> {
             &settings.sensor.with_profile(number),
             Some(&settings.lighting),
             Some(&buttons.with_profile(number)),
+            &[],
         )?;
         Ok(number)
     }
@@ -485,6 +494,7 @@ impl<T: Transport> KoneProAir<T> {
                 &settings.sensor.with_profile(*target),
                 moves.then_some(&settings.lighting),
                 Some(&buttons.with_profile(*target)),
+                &[],
             )?;
         }
         // The active profile moved with its settings.
@@ -543,7 +553,9 @@ impl<T: Transport> KoneProAir<T> {
     }
 
     /// Writes button assignments to the profile they belong to and checks
-    /// that they read back unchanged.
+    /// that they read back unchanged. A newly assigned macro plays whatever
+    /// the mouse has stored under its number; use [`Self::write_macro`] to
+    /// write its keys too.
     ///
     /// Block writes go to the profile named in the last block 0 written, so
     /// this writes the profile's table entry and block 0 as read, then
@@ -553,7 +565,44 @@ impl<T: Transport> KoneProAir<T> {
         let profile: u8 = buttons.profile();
         let entry: ProfileEntry = self.profile_entry(profile)?;
         let sensor: Sensor = self.read_profile(Some(profile), Self::read_selected_sensor)?;
-        self.write_blocks(&entry, &sensor, None, Some(buttons))
+        self.write_blocks(&entry, &sensor, None, Some(buttons), &[])
+    }
+
+    /// Writes `macro_` as the macro that `button` plays in `layer` of the
+    /// profile `buttons` belong to, together with `buttons`, which must assign
+    /// a macro to that button (see [`Buttons::set_action`]). The buttons are
+    /// checked by reading them back; the macro itself cannot be read back.
+    ///
+    /// Macros are shared by all profiles: every profile whose `button` plays
+    /// a macro in `layer` plays this one afterwards.
+    pub fn write_macro(
+        &mut self,
+        buttons: &Buttons,
+        button: u8,
+        layer: Layer,
+        macro_: &Macro,
+    ) -> Result<()> {
+        if !matches!(buttons.action(button, layer)?, ButtonAction::Macro(_)) {
+            return Err(Error::InvalidValue(format!(
+                "button {button} does not play a macro in these assignments"
+            )));
+        }
+        let number: u8 = Buttons::macro_number(button, layer)?
+            .ok_or_else(|| Error::InvalidValue(format!("button {button} cannot play a macro")))?;
+        let name: String = match layer {
+            Layer::Standard => format!("button {button}"),
+            Layer::EasyShift => format!("button {button} easy-shift"),
+        };
+        let mut reports: Vec<Report> = (0u8..)
+            .zip(macro_.record(number, &name))
+            .map(|(index, chunk)| protocol::write_macro_chunk(number, index, &chunk))
+            .collect();
+        reports.push(protocol::commit_macro(number));
+
+        let profile: u8 = buttons.profile();
+        let entry: ProfileEntry = self.profile_entry(profile)?;
+        let sensor: Sensor = self.read_profile(Some(profile), Self::read_selected_sensor)?;
+        self.write_blocks(&entry, &sensor, None, Some(buttons), &reports)
     }
 
     /// Writes `settings` to the profile they belong to and checks that they
@@ -568,7 +617,13 @@ impl<T: Transport> KoneProAir<T> {
     /// colours. Use [`Self::write_sensor`] when only the sensor settings changed.
     pub fn write_settings(&mut self, settings: &ProfileSettings) -> Result<()> {
         let entry: ProfileEntry = self.profile_entry(settings.profile())?;
-        self.write_blocks(&entry, &settings.sensor, Some(&settings.lighting), None)
+        self.write_blocks(
+            &entry,
+            &settings.sensor,
+            Some(&settings.lighting),
+            None,
+            &[],
+        )
     }
 
     /// Writes only block 0 ([`Sensor`]: polling rate, DPI stages and AUTO
@@ -577,7 +632,7 @@ impl<T: Transport> KoneProAir<T> {
     /// back unchanged. The saved lighting is left alone.
     pub fn write_sensor(&mut self, sensor: &Sensor) -> Result<()> {
         let entry: ProfileEntry = self.profile_entry(sensor.profile())?;
-        self.write_blocks(&entry, sensor, None, None)
+        self.write_blocks(&entry, sensor, None, None, &[])
     }
 
     /// Sets the debounce time (0–10 ms) in every profile in use, as the
@@ -677,6 +732,7 @@ impl<T: Transport> KoneProAir<T> {
                 &settings.sensor,
                 Some(&settings.lighting),
                 profile.buttons.as_ref(),
+                &[],
             )?;
         }
         self.set_active_profile(backup.active_profile)?;
@@ -795,12 +851,16 @@ impl<T: Transport> KoneProAir<T> {
     ///
     /// Block 0 comes first: the mouse writes blocks 1–4 into the profile named
     /// in the last block 0 it received (the table entry does not select it).
+    ///
+    /// `macros` (macro record chunks and commits) are sent after the blocks,
+    /// before the read-back, as the official software does.
     fn write_blocks(
         &mut self,
         entry: &ProfileEntry,
         sensor: &Sensor,
         lighting: Option<&Lighting>,
         buttons: Option<&Buttons>,
+        macros: &[Report],
     ) -> Result<()> {
         let profile: u8 = sensor.profile();
         profile_index(profile)?;
@@ -823,6 +883,13 @@ impl<T: Transport> KoneProAir<T> {
         if let Some(buttons) = buttons {
             for report in protocol::write_buttons(buttons) {
                 self.command(&report, "button write")?;
+            }
+        }
+        for report in macros {
+            if protocol::is_macro_commit(report) {
+                self.command_once(report, "macro commit", MACRO_COMMIT_DEADLINE)?;
+            } else {
+                self.command(report, "macro write")?;
             }
         }
 
@@ -945,6 +1012,32 @@ impl<T: Transport> KoneProAir<T> {
         Err(Error::Timeout(what))
     }
 
+    /// Sends a write command once (no repeat), waits up to `deadline` until
+    /// the mouse accepts it and gives the mouse [`WRITE_SETTLE`].
+    fn command_once(
+        &mut self,
+        report: &Report,
+        what: &'static str,
+        deadline: Duration,
+    ) -> Result<()> {
+        self.exchange_with(
+            report,
+            what,
+            0,
+            deadline,
+            |reply| match protocol::parse_status(reply, report) {
+                Some(Status::Accepted) => Some(Ok(())),
+                Some(Status::Error(code)) => Some(Err(Error::Rejected {
+                    command: what,
+                    code,
+                })),
+                None => None,
+            },
+        )?;
+        std::thread::sleep(WRITE_SETTLE);
+        Ok(())
+    }
+
     /// Sends a write command, waits until the mouse accepts it and gives the
     /// mouse [`WRITE_SETTLE`] before the next request.
     fn command(&mut self, report: &Report, what: &'static str) -> Result<()> {
@@ -998,7 +1091,7 @@ mod tests {
 
     use super::*;
     use crate::buttons::tests::start_buttons;
-    use crate::buttons::{ButtonAction, MouseFunction};
+    use crate::buttons::{MacroMode, MouseFunction};
     use crate::protocol::report_with_prefix;
     use crate::protocol::tests::{
         BUTTON_FUNCTIONS_REPLY, BUTTONS_REPLY, CABLE_INFO_REPLY, EASY_SHIFT_BUTTONS_REPLY,
@@ -1351,6 +1444,100 @@ mod tests {
         assert_eq!(written[7][4], 2);
         assert_eq!(written[8..11], protocol::write_buttons(&buttons));
         assert_eq!(written.last(), Some(&protocol::select_profile(1)));
+    }
+
+    #[test]
+    fn write_macro_sends_the_record_after_the_blocks() {
+        let mut buttons = start_buttons();
+        buttons
+            .set_action(
+                7,
+                Layer::Standard,
+                ButtonAction::Macro(MacroMode::OnPress { repeat: 1 }),
+            )
+            .expect("allowed");
+        let macro_: Macro = "down:c, 50ms, up:c".parse().expect("macro");
+        let stored = Sensor::from_bytes(start_settings().sensor.write_bytes());
+        let mut batches = vec![
+            vec![report_with_prefix(&PROFILE_TABLE_REPLY)],
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![accepted(0x11)],
+        ];
+        batches.extend(vec![vec![accepted(0x50)]; 4]);
+        batches.extend([
+            vec![accepted(0x23)],
+            vec![accepted(0x23)],
+            vec![accepted(0x60)],
+        ]);
+        batches.extend([vec![info_reply(&stored)], vec![info_reply(&stored)]]);
+        batches.extend(button_replies(&buttons));
+        let mut mouse = connect(batches);
+        mouse
+            .write_macro(&buttons, 7, Layer::Standard, &macro_)
+            .expect("write");
+
+        let written: &[Report] = &mouse.transport.written[1..];
+        // Entry, block 0, blocks 2-4, then the record of macro 4 (capture 67).
+        assert_eq!(written[4], protocol::write_sensor(&start_settings().sensor));
+        assert_eq!(written[5..8], protocol::write_buttons(&buttons));
+        assert_eq!(
+            written[8][..8],
+            [0x10, 0x23, 0x3c, 0x00, 0x04, 0x09, 0x04, 0x38]
+        );
+        assert_eq!(
+            written[9][..19],
+            [
+                0x10, 0x23, 0x3c, 0x01, 0x02, 0x0a, 0x00, 0x00, 0x00, 0x01, 0x00, 0x06, 0x32, 0x00,
+                0x81, 0x00, 0x06, 0x00, 0x00
+            ]
+        );
+        assert_eq!(written[10], protocol::commit_macro(4));
+        assert_eq!(written[13..], button_queries());
+    }
+
+    #[test]
+    fn macro_commit_is_not_repeated() {
+        let mut buttons = start_buttons();
+        buttons
+            .set_action(
+                7,
+                Layer::Standard,
+                ButtonAction::Macro(MacroMode::OnPress { repeat: 1 }),
+            )
+            .expect("allowed");
+        let macro_: Macro = "a".parse().expect("macro");
+        let mut batches = vec![
+            vec![report_with_prefix(&PROFILE_TABLE_REPLY)],
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![accepted(0x11)],
+        ];
+        batches.extend(vec![vec![accepted(0x50)]; 4]);
+        batches.extend([vec![accepted(0x23)], vec![accepted(0x23)]]);
+        let mut mouse = connect(batches);
+        assert!(matches!(
+            mouse.write_macro(&buttons, 7, Layer::Standard, &macro_),
+            Err(Error::Timeout("macro commit"))
+        ));
+        let commits: usize = mouse
+            .transport
+            .written
+            .iter()
+            .filter(|report| protocol::is_macro_commit(report))
+            .count();
+        assert_eq!(commits, 1);
+    }
+
+    #[test]
+    fn write_macro_needs_a_macro_assignment() {
+        let macro_: Macro = "a".parse().expect("macro");
+        let mut mouse = connect(vec![]);
+        assert!(matches!(
+            mouse.write_macro(&start_buttons(), 7, Layer::Standard, &macro_),
+            Err(Error::InvalidValue(_))
+        ));
+        assert_eq!(mouse.transport.written.len(), 1);
     }
 
     #[test]
