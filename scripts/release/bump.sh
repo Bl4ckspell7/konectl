@@ -29,12 +29,17 @@ die() {
 
 # Current version: `version = "x"` inside the [workspace.package] table.
 current_version() {
-    sed -nE '/^\[workspace\.package\]/,/^\[/{s/^version = "([^"]+)".*/\1/p}' "$CARGO_TOML" | head -n1
+    # sed quits after the first match, so no `| head` (which can make the
+    # writer fail with SIGPIPE under pipefail).
+    sed -nE '/^\[workspace\.package\]/,/^\[/{s/^version = "([^"]+)".*/\1/p;T;q}' "$CARGO_TOML"
 }
 
 # Highest existing release tag, without the leading "v".
 latest_tag_version() {
-    git tag --list 'v[0-9]*' --sort=-v:refname | head -n1 | sed 's/^v//'
+    local tags
+    tags="$(git tag --list 'v[0-9]*' --sort=-v:refname)"
+    tags="${tags%%$'\n'*}"
+    echo "${tags#v}"
 }
 
 # bump_semver <x.y.z> <major|minor|patch>
@@ -111,7 +116,7 @@ check_applied() {
     grep -q '^konectl = { path = "crates/konectl", version = "'"$v"'" }' "$CARGO_TOML" ||
         die "$CARGO_TOML: konectl dependency version not updated"
     for crate in "${CRATES[@]}"; do
-        grep -A1 -x 'name = "'"$crate"'"' "$CARGO_LOCK" | grep -qx 'version = "'"$v"'"' ||
+        [[ "$(grep -A1 -x 'name = "'"$crate"'"' "$CARGO_LOCK")" == *$'\n'"version = \"$v\"" ]] ||
             die "$CARGO_LOCK: $crate version not updated"
     done
 }

@@ -174,7 +174,11 @@ jobs:
           # Library first, the CLI depends on it. Versions already on crates.io
           # are skipped, so a failed run can simply be re-run.
           for crate in konectl konectl-cli; do
-            if curl -fsS "https://index.crates.io/ko/ne/${crate}" | grep -q "\"vers\":\"${VERSION}\""; then
+            # Read the index first: `curl | grep -q` can fail under pipefail
+            # when grep exits before curl has written everything.
+            # A failed request counts as "not published yet", as before.
+            index="$(curl -fsS "https://index.crates.io/ko/ne/${crate}")" || index=""
+            if grep -q "\"vers\":\"${VERSION}\"" <<<"$index"; then
               echo "${crate} ${VERSION} is already on crates.io"
             else
               cargo publish -p "$crate" --locked
