@@ -8,13 +8,24 @@
 #
 # Writes tools/re/captures/<NN>-<name>.pcapng plus a .dev file describing the
 # device (bus, address, config interface and its endpoints) for extract.sh.
+# With both connected the dongle is captured; KONECTL_RE_DEVICE=cable (or
+# dongle) picks one.
 # Needs usbmon loaded and read access to /dev/usbmon* (see the host setup in
 # docs/reverse-engineering.md).
 set -euo pipefail
 
 readonly VENDOR_ID="1e7d"
 # Preferred order: wireless dongle first (that is what the VM gets), then cable.
-readonly PRODUCT_IDS=("2c8e" "2c92")
+case "${KONECTL_RE_DEVICE:-}" in
+    "") PRODUCT_IDS=("2c8e" "2c92") ;;
+    dongle) PRODUCT_IDS=("2c8e") ;;
+    cable) PRODUCT_IDS=("2c92") ;;
+    *)
+        echo "error: KONECTL_RE_DEVICE must be dongle or cable" >&2
+        exit 1
+        ;;
+esac
+readonly PRODUCT_IDS
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
@@ -91,7 +102,8 @@ find_device() {
     return 1
 }
 
-read -r device_dir product_id < <(find_device) || die "no Kone Pro Air connected"
+read -r device_dir product_id < <(find_device) ||
+    die "no Kone Pro Air connected${KONECTL_RE_DEVICE:+ (${KONECTL_RE_DEVICE})}"
 case "$product_id" in
     2c8e) interface=2 ;; # dongle
     2c92) interface=1 ;; # cable

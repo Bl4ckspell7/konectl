@@ -27,15 +27,17 @@ pub mod buttons;
 mod color;
 mod device;
 mod error;
+pub mod macros;
 pub mod protocol;
 pub mod settings;
 mod transport;
 
 pub use backup::{Backup, ProfileBackup};
-pub use buttons::{ButtonAction, Buttons, Layer};
+pub use buttons::{ButtonAction, Buttons, Layer, MacroMode};
 pub use color::{ParseRgbError, Rgb};
 pub use device::{ConnectionMode, DeviceInfo, KoneProAir, Manager};
 pub use error::{Error, Result};
+pub use macros::{Macro, MacroEvent};
 pub use protocol::{Battery, Report, Signal};
 pub use settings::{
     Effect, Firmware, Info, LedTimeout, LiftOff, Lighting, PollingRate, ProfileSettings, Sensor,

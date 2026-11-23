@@ -71,6 +71,7 @@ error `0d`. Moving the mouse wakes it up.
 | `10 08 01 00 01`, `90 08`, `10 15 01 00 01` | lift-off calibration, see below |
 | `10 62 08 00 36 31 18 38 27 98 10 94` | factory reset, see [below](#factory-reset) |
 | `10 09 01 00 01` to the dongle | start pairing, see [below](#pairing)     |
+| `10 <1f+N> 3c <chunk> …`, `10 60 06 00 92 2c 00 00 00 <N>` | macro `N`: record and commit, see [macros](#macros) |
 | `90 09` to the dongle       | connection state: `cc` = mouse connected and awake, `dd` = asleep (Swarm polls it) |
 | `90 07 …` from the mouse    | button press for a function Swarm carries out, see [buttons](#blocks-24-buttons) |
 | `90 71`, `10 0a`, `10 71`   | *unknown*, see below |
@@ -206,7 +207,8 @@ button); the blocks store them in another order:
 | Button | 1 | 2 | 3 | 7 | 6 | 8 | 4 | 5 |
 
 - Block 2, bytes 0–7: the function code of slots 1–8 in the standard layer;
-  bytes 8–15: the same for the Easy-Shift layer; bytes 16–27: *unknown* (`00`).
+  bytes 8–15: the same for the Easy-Shift layer; bytes 16–27: how macros 1–12
+  are played (see [macros](#macros)).
 - Blocks 3 (standard layer) and 4 (Easy-Shift layer): a three-byte entry per
   slot. It is used with function code `40`; with any other code Swarm writes
   `00 00 00`.
@@ -214,6 +216,7 @@ button); the blocks store them in another order:
 | Code (block 2)    | Function                                              |
 |-------------------|-------------------------------------------------------|
 | `00`              | disabled                                              |
+| `01`–`0c`         | play macro 1–12 (entry `00 00 00`), see [macros](#macros) |
 | `40`              | what the entry says (next table)                      |
 | `41`              | profile cycle                                         |
 | `42`              | DPI cycle                                             |
@@ -253,9 +256,52 @@ What Swarm offers (konectl follows it):
   Easy-Shift button disables its Easy-Shift function (code `00`); giving
   button 6 another function makes its Easy-Shift function available.
 - *RESET* gives a button its default function (button 7: browser back).
+- Left and right click must stay on a button: to change button 2, another
+  button needs *Menu* first.
 
 konectl also keeps button 1 as click in the standard layer, so the mouse stays
 usable.
+
+#### Macros
+
+The mouse plays macros by itself. Their numbers belong to the buttons that can
+play one: slots 1–5 (buttons 1, 2, 3, 7, 6) are macros 1–5 in the standard
+layer and macros 7–11 in the Easy-Shift layer. A button plays its macro when
+its function code is that number.
+
+The macros are **shared by all profiles**: there is one macro per number, and
+every profile whose button plays it plays the one written last. (Writing
+macro 4 while assigning it in profile 2 changed what button 7 typed in profile
+1 too.) Block 2 bytes 16–27 hold how macros 1–12 are played, per profile:
+`01`–`63` = once per press, repeated that many times (Swarm offers 1–99),
+`fd` = while the button is held, `fe` = start and stop with a press ("Macro
+Toggle"), `00` = not assigned.
+
+A macro is written as a record of 60-byte chunks, `10 <1f+N> 3c <chunk>`
+(macro 3: `10 22`, macro 10: `10 29`), followed by
+`10 60 06 00 92 2c 00 00 00 <N>` (answered after about 200 ms). Swarm sends
+them after the blocks of the profile that assigns the macro. The record:
+
+| Offset | Meaning                                                      |
+|--------|--------------------------------------------------------------|
+| 0      | macro number                                                 |
+| 1–3    | `09 04 38` in every record Swarm wrote                       |
+| 4–31   | macro group name in Swarm, ASCII, zero-padded                |
+| 32–59  | macro name                                                   |
+| 60     | number of events                                             |
+| 61–62  | length of the events in bytes (5 per event), little-endian   |
+| 63–64  | `00 00`                                                      |
+| 65…    | events, then zeros up to the end of the last chunk           |
+
+An event is `<01 = press, 81 = release> <modifier mask> <HID usage> <delay,
+little-endian ms>`, with the delay after it. Swarm writes a modifier key as an
+event with its bit in the mask and usage `00` (Shift down: `01 02 00 …`), and
+the last event with delay 0. Swarm records only keyboard keys.
+
+Nothing reads a macro back: Swarm keeps its macros on the computer and only
+writes them. Changing a button from a macro to another function only changes
+block 2 (code and mode `00`); the record stays. Keys are HID usages (named
+after the US layout); with a German layout the computer types `z` for `y`.
 
 ### Apply sequence (Swarm)
 
@@ -390,8 +436,10 @@ The payload has the layout of [block 1](#block-1-saved-lighting): effect `09`,
 - `10 0a 01 00 <b>`: Swarm sends `01` once when it starts, and `00` after
   reading the battery.
 - `90 71` (answer `aa 03 00 aa aa`): written back unchanged by every *Apply*.
-- Block 0 byte 16, block 2 bytes 16–27, byte 1 of the profile table entries
-  (`64`), function code `55` (between the two Easy-Aim presets).
+- Block 0 byte 16, byte 1 of the profile table entries (`64`), function
+  code `55` (between the two Easy-Aim presets), bytes 1–3 of a macro record,
+  macro numbers 6 and 12 (no button uses them), Swarm's limit for the length
+  of a macro (100 events in ten chunks worked).
 - The payload of the reset command. Unused profile slots keep leftovers after
   a reset (slot 5: `00 64 f6 ff 39`); byte 0 `00` marks them unused.
 

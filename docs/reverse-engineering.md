@@ -85,8 +85,8 @@ for different buttons, so take a screenshot after opening one.
 
 The wireless mouse falls asleep after a few idle minutes, and Swarm then blocks
 its window until the mouse is moved. For long sessions use the cable
-(`KONECTL_RE_USB` as above) and unplug the dongle, so that `capture.sh` picks
-the cable.
+(`KONECTL_RE_USB` as above); with the dongle still plugged in, run the captures
+with `KONECTL_RE_DEVICE=cable` so that `capture.sh` picks the cable.
 
 `compose.yaml` mounts `/dev/bus/usb` into the container, so a device that is
 plugged in after the start can be passed through as well. QEMU does not notice
@@ -179,6 +179,11 @@ and applied with *Apply* (Swarm rewrites all profiles on every *Apply*):
 | 61–63 | add profile slots 4 and 5, delete slot 4     | Swarm's default profiles, deleting moves the later ones down |
 | 64–65 | *RESET SETTINGS*, twice                      | `10 62` with a constant payload        |
 | 66    | *Pair* with dongle and cable passed through  | `10 09 01 00 01` to the dongle         |
+| 67–71 | preset macro on button 7; modes while pressed, toggle, repeat 3 | macro record `10 23`, commit `10 60`, mode in block 2 |
+| 72–73 | a second macro on button 3; a recorded 42-event macro | macro numbers, event format, chunks |
+| 74–75 | macros on Easy-Shift 7, 1 and 2              | Easy-Shift macro numbers 7–11          |
+| 76    | button 3 back to universal scrolling         | the record stays, only block 2 changes |
+| 77–78 | macros on buttons 2 and 6 and on Easy-Shift 3 and 6 | macro numbers 2, 5, 9 and 11; right click must stay on a button |
 
 Closing Swarm's window only hides it in the tray, so it reads nothing when it
 is opened again; quit it from the tray icon instead.
