@@ -122,12 +122,14 @@ endpoints="$(cat "$interface_dir"/ep_*/bEndpointAddress | paste -sd, -)"
 mkdir -p "$CAPTURE_DIR"
 # Next number after the highest existing one, so deleted captures leave gaps
 # instead of numbers being reused.
-last="$(find "$CAPTURE_DIR" -maxdepth 1 -name '[0-9][0-9]-*.pcapng' -printf '%f\n' |
-    cut -c1-2 | sort -n | tail -n 1)"
 number=0
-if [[ -n "$last" ]]; then
-    number=$((10#$last + 1))
-fi
+while IFS= read -r file; do
+    prefix="${file%%-*}"
+    [[ "$prefix" =~ ^[0-9]+$ ]] || continue
+    if ((10#$prefix >= number)); then
+        number=$((10#$prefix + 1))
+    fi
+done < <(find "$CAPTURE_DIR" -maxdepth 1 -name '[0-9]*-*.pcapng' -printf '%f\n')
 output="${CAPTURE_DIR}/$(printf '%02d' "$number")-${name}.pcapng"
 [[ ! -e "$output" ]] || die "${output} already exists"
 

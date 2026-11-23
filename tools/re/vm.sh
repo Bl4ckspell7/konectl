@@ -155,9 +155,10 @@ case "$1" in
     scroll)
         [[ $# -eq 4 && "$4" =~ ^-?[0-9]+$ ]] || usage
         abs_move "$2" "$3"
-        steps="$4" direction="wheel-down"
-        if ((steps < 0)); then
-            direction="wheel-up" steps=$((-steps))
+        # Decimal even with leading zeros (08 would be read as octal).
+        steps=$((10#${4#-})) direction="wheel-down"
+        if [[ "$4" == -* ]]; then
+            direction="wheel-up"
         fi
         for ((i = 0; i < steps; i++)); do button "$direction"; done
         ;;
