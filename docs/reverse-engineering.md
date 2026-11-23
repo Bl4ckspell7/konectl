@@ -29,8 +29,10 @@ sudo modprobe usbmon && sudo udevadm trigger --subsystem-match=usbmon
 
 [`tools/re/compose.yaml`](../tools/re/compose.yaml) runs
 [dockur/windows](https://github.com/dockur/windows) with the wireless dongle
-passed through. `KONECTL_RE_USB` selects the USB device for the VM: empty for
-none, `-device usb-host,vendorid=0x1e7d,productid=0x2c92` for the cable.
+passed through. `KONECTL_RE_USB` selects the USB devices for the VM: empty for
+none, `-device usb-host,vendorid=0x1e7d,productid=0x2c92,id=cable` for the
+cable, or both devices (pairing needs the dongle, and the cable keeps the mouse
+awake).
 
 ```sh
 tools/re/fetch-iso.sh                                          # Windows 11 LTSC evaluation ISO, 4.8 GB
@@ -86,22 +88,26 @@ its window until the mouse is moved. For long sessions use the cable
 (`KONECTL_RE_USB` as above) and unplug the dongle, so that `capture.sh` picks
 the cable.
 
-To use the mouse on the host in between without restarting Windows, detach it
-from the VM through QMP and attach it again later; Swarm reads it again when it
-comes back:
+`compose.yaml` mounts `/dev/bus/usb` into the container, so a device that is
+plugged in after the start can be passed through as well. QEMU does not notice
+it by itself, though (no hotplug events reach it in the container): after
+plugging a device in again, or to use the mouse on the host in between
+without restarting Windows, detach it through QMP and attach it again by its
+device node. Swarm reads it again when it comes back:
 
 ```sh
 qmp() {
     printf '%s\n' '{"execute":"qmp_capabilities"}' "$1" |
         docker exec -i konectl-re-windows sh -c 'nc -U -q 1 /run/shm/qmp.sock'
 }
-qmp '{"execute":"qom-list","arguments":{"path":"/machine/peripheral-anon"}}'  # find usb-host
-qmp '{"execute":"device_del","arguments":{"id":"/machine/peripheral-anon/device[3]"}}'
-qmp '{"execute":"device_add","arguments":{"driver":"usb-host","vendorid":7805,"productid":11410,"id":"mouse"}}'
+qmp '{"execute":"device_del","arguments":{"id":"cable"}}'   # the mouse goes to the host
+# Attach it again; bus and device number as lsusb shows them, e.g. 007 and 003.
+qmp '{"execute":"device_add","arguments":{"driver":"usb-host","hostdevice":"/dev/bus/usb/007/003","id":"cable"}}'
 ```
 
-(`7805` and `11410` are `0x1e7d` and `0x2c92`, the cable; once attached this
-way, the device is detached with `"id":"mouse"`.)
+The ids are those in `KONECTL_RE_USB` (`dongle` by default). Captures filter
+by device number, so a capture across a replug needs a second `.dev` file with
+the new number.
 
 ## Capturing
 
@@ -170,6 +176,9 @@ and applied with *Apply* (Swarm rewrites all profiles on every *Apply*):
 | 51–56 | six batches of button assignments, up to 11 buttons per *Apply* | slot order, block 2 codes, block 3/4 entries |
 | 58    | profile colour red for slot 2                | profile table entry bytes 2–4          |
 | 59–60 | "Open Swarm" on button 7, then pressed twice | `0b` entries are reported with `90 07` |
+| 61–63 | add profile slots 4 and 5, delete slot 4     | Swarm's default profiles, deleting moves the later ones down |
+| 64–65 | *RESET SETTINGS*, twice                      | `10 62` with a constant payload        |
+| 66    | *Pair* with dongle and cable passed through  | `10 09 01 00 01` to the dongle         |
 
 Closing Swarm's window only hides it in the tray, so it reads nothing when it
 is opened again; quit it from the tray icon instead.

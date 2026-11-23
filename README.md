@@ -18,7 +18,8 @@ to the mouse directly over hidraw.
 | LED time-out, energy saving               | ✅     |
 | DPI "AUTO" flags, lift-off calibration, colour intensity | ✅ |
 | Saved lighting (effect, colours, brightness, speed) | ✅ |
-| Profiles (show, activate, per-profile settings) | ✅ |
+| Profiles (show, activate, add, remove, colour, per-profile settings) | ✅ |
+| Factory reset, pairing with the dongle    | ✅     |
 | Button assignment (standard and Easy-Shift layer) | ✅ |
 | Backup and restore of the per-profile settings and buttons (not energy saving or the lift-off calibration) | ✅ |
 | Live LED colours (lost on sleep)          | ✅     |
@@ -92,6 +93,9 @@ konectl lighting static --intensity 50   # colour intensity (also --left-/--righ
 konectl lighting wave -s 4      # effects: off, static, breathing, heartbeat,
                                 #          wave, blinking, aimo, battery
 konectl profile                 # profiles in use; konectl profile 2 activates one
+konectl profile add             # add a profile, a copy of the active one (--copy-from N)
+konectl profile remove 4        # remove profile 4; the profiles after it move down
+konectl profile color 2 f40000  # the colour the DPI LED flashes for profile 2 (or none)
 
 konectl buttons                 # button assignments (standard and Easy-Shift layer)
 konectl button 7 back           # rear side button: browser back
@@ -101,7 +105,10 @@ konectl button 7 easy-aim:400   # 400 DPI while the button is held
                                 # all functions: konectl button --help
 
 konectl backup my-mouse.txt     # save all profiles
-konectl restore my-mouse.txt    # write them back
+konectl restore my-mouse.txt    # write them back (profiles not in the file are removed)
+
+konectl reset                   # factory settings (asks first; undo with restore)
+konectl pair                    # pair the mouse with the dongle (asks first, guides you)
 
 konectl led ff0000 0000ff       # live colours until the mouse sleeps (not saved)
 konectl raw 90 0a               # send a raw report, print the replies (debugging)

@@ -69,7 +69,9 @@ error `0d`. Moving the mouse wakes it up.
 | `10 10 0b 00 …`             | live LED colours (not saved)                  |
 | `90 72` / `10 72 01 00 <v>` | energy saving: `aa` = on, `00` = off (one setting for all profiles) |
 | `10 08 01 00 01`, `90 08`, `10 15 01 00 01` | lift-off calibration, see below |
-| `90 09`                     | connection state: `cc` = mouse awake, `dd` = asleep (Swarm polls it) |
+| `10 62 08 00 36 31 18 38 27 98 10 94` | factory reset, see [below](#factory-reset) |
+| `10 09 01 00 01` to the dongle | start pairing, see [below](#pairing)     |
+| `90 09` to the dongle       | connection state: `cc` = mouse connected and awake, `dd` = asleep (Swarm polls it) |
 | `90 07 …` from the mouse    | button press for a function Swarm carries out, see [buttons](#blocks-24-buttons) |
 | `90 71`, `10 0a`, `10 71`   | *unknown*, see below |
 
@@ -96,7 +98,8 @@ Answer, payload length `0x26`:
 
 ### Profiles
 
-The mouse has five profile slots; Swarm uses slots 1–3.
+The mouse has five profile slots. Swarm uses the first ones, as many as there
+are profiles (three when it is installed).
 
 - `10 13 01 00 <p>` selects profile `p` for the reads that follow (`90 00` and
   `90 01`…`90 05`). Swarm selects each profile in turn when it starts, and
@@ -109,7 +112,23 @@ The mouse has five profile slots; Swarm uses slots 1–3.
   DPI LED flashes when the mouse switches to the profile; `00 00 00` = none
   (Swarm's red is `f4 00 00`).
 - `10 11 06 00 <p> <5 bytes>` writes entry `p` of the table. Swarm sends it
-  before the block writes of each profile, with the bytes it read.
+  before the block writes of each profile, with the bytes it read, and a zero
+  entry for every unused slot.
+- Adding a profile (*+*): Swarm writes the entry of the next slot and all five
+  blocks with its own defaults, which differ per slot (slot 4: heartbeat
+  lighting, block 0 byte 16 = `80`; slot 5: static blue, byte 16 = `01`; both
+  with DPI 400–3200, buttons 6/7 forward/back, button 8 profile cycle, no
+  Easy-Shift button, debounce 10 ms).
+- Deleting one (*Delete Profile*): the profiles after it move down one slot
+  (entry and blocks rewritten with the new number), and the entry of the
+  last slot is written as zeros.
+
+konectl adds a profile as a copy of an existing one (without its colour) and
+removes one the same way as Swarm; it does not remove the active profile.
+Buttons that switch to a profile (`48`–`4a`) are renumbered to keep pointing
+at the same profile, and disabled if they pointed at the removed one.
+Swarm's profile menu also offers export, import, linked applications,
+*Set as Desktop Profile* and *Profile Autoswitch*, which exist in Swarm only.
 
 ### Settings blocks
 
@@ -288,6 +307,31 @@ Swarm quirks seen in the captures:
   picker are stored one lower too (50 → 49).
 - Enabling a stage without changing its value (still shown as 50) sends nothing.
 
+### Factory reset
+
+`10 62 08 00 36 31 18 38 27 98 10 94` resets the mouse (the same payload in two
+captures; its meaning is *unknown*). The answer `ec ac` comes after about 1.5
+seconds, and Swarm sends nothing else. Afterwards:
+
+- the profile slots in use stay in use, with default settings: DPI 400, 800,
+  1200, 1600 and 3200 (stage 2 active), lift-off very low, debounce 10 ms, LED
+  time-out 15 minutes, a default lighting and colour per slot (slot 1: AIMO and
+  purple `bf 0b dc`, slot 2: wave and white, slot 3: breathing and red, slot 4:
+  heartbeat and green `51 ff 00`);
+- blocks 2–4 read `ff` everywhere except button 8 (code `41`, profile cycle):
+  the firmware's default functions;
+- block 0 bytes 15 and 16 read `ff` at first;
+- energy saving is on.
+
+### Pairing
+
+Swarm's *Pair* button sends `10 09 01 00 01` to the dongle (answered `ec ac`).
+The mouse is then paired by hand, as Swarm's dialog says: unplug its cable,
+hold the profile button for three seconds, and plug the dongle in again when
+the lighting effect has finished. `90 09` on the dongle answers `cc` once the
+mouse is connected. `konectl pair` sends the command, waits until the dongle
+was plugged in again and checks that the mouse answers through it.
+
 ### Battery: `90 0a`
 
 | Answer offset | Meaning                     |
@@ -338,6 +382,8 @@ The payload has the layout of [block 1](#block-1-saved-lighting): effect `09`,
   it wakes with its stored effect again (e.g. rainbow). Nothing is saved.
 - Answer: `10 10 03 00 ec ac 00 …` (accepted).
 - Brightness is applied by scaling the RGB values in software.
+- Swarm draws the AIMO effect itself with this report: while it runs, it
+  sends new colours about every 45 ms.
 
 ### Not understood yet
 
@@ -346,6 +392,8 @@ The payload has the layout of [block 1](#block-1-saved-lighting): effect `09`,
 - `90 71` (answer `aa 03 00 aa aa`): written back unchanged by every *Apply*.
 - Block 0 byte 16, block 2 bytes 16–27, byte 1 of the profile table entries
   (`64`), function code `55` (between the two Easy-Aim presets).
+- The payload of the reset command. Unused profile slots keep leftovers after
+  a reset (slot 5: `00 64 f6 ff 39`); byte 0 `00` marks them unused.
 
 Swarm features that are not stored on the mouse: the DPI *Calibrate* dialog
 (an aiming game that suggests a DPI value), the colour picker's *Gradient*
