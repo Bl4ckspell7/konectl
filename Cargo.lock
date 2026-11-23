@@ -153,7 +153,7 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "konectl"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "hidapi",
  "thiserror",
@@ -161,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "konectl-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
