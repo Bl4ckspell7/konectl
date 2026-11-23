@@ -48,15 +48,41 @@ pub(crate) const LIGHTING_LEN: usize = 11;
 /// Length of one profile table entry.
 pub(crate) const PROFILE_ENTRY_LEN: usize = 5;
 
-/// One entry of the profile table (`90 11`). Its bytes are not understood;
-/// they are only read and written back.
+/// One entry of the profile table (`90 11`): byte 0 marks the slot as in use,
+/// byte 1 is not understood, bytes 2–4 are the profile colour.
 pub type ProfileEntry = [u8; PROFILE_ENTRY_LEN];
+
+/// Entry of an unused profile slot.
+pub(crate) const UNUSED_PROFILE_ENTRY: ProfileEntry = [0; PROFILE_ENTRY_LEN];
+const PROFILE_COLOR: usize = 2;
 
 /// `true` if the profile table entry belongs to a slot in use.
 ///
-/// Slots used by the official software hold `01 64 00 00 00`, unused ones are zero.
+/// Slots used by the official software hold `01 64` and the profile colour;
+/// unused ones are zero (or hold leftovers after a factory reset, with byte 0 zero).
 pub fn profile_in_use(entry: &ProfileEntry) -> bool {
     entry[0] != 0
+}
+
+/// The colour the DPI LED flashes when the mouse switches to the profile, or
+/// `None` (stored as black).
+pub fn profile_color(entry: &ProfileEntry) -> Option<Rgb> {
+    let [r, g, b] = [
+        entry[PROFILE_COLOR],
+        entry[PROFILE_COLOR + 1],
+        entry[PROFILE_COLOR + 2],
+    ];
+    if [r, g, b] == [0; 3] {
+        None
+    } else {
+        Some(Rgb::new(r, g, b))
+    }
+}
+
+/// Sets the profile colour of a table entry; `None` removes it.
+pub fn set_profile_color(entry: &mut ProfileEntry, color: Option<Rgb>) {
+    let bytes: [u8; 3] = color.map_or([0; 3], Rgb::to_bytes);
+    entry[PROFILE_COLOR..PROFILE_COLOR + 3].copy_from_slice(&bytes);
 }
 
 /// Checks a 1-based profile number and returns its 0-based index.
@@ -308,6 +334,13 @@ impl Sensor {
     /// The block as read from the mouse.
     pub const fn bytes(&self) -> [u8; SENSOR_LEN] {
         self.bytes
+    }
+
+    /// The same block for profile `profile`, e.g. to copy a profile.
+    pub(crate) const fn with_profile(&self, profile: u8) -> Self {
+        let mut bytes: [u8; SENSOR_LEN] = self.bytes;
+        bytes[Self::PROFILE] = profile;
+        Self { bytes }
     }
 
     /// The block as konectl writes it. Bit 7 of byte 16 is cleared, as the
@@ -732,6 +765,23 @@ impl Lighting {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_colour_is_in_the_table_entry() {
+        // Capture 58 and the factory state after a reset.
+        let mut entry: ProfileEntry = [0x01, 0x64, 0x00, 0x00, 0x00];
+        assert_eq!(profile_color(&entry), None);
+        set_profile_color(&mut entry, Some(Rgb::new(0xf4, 0x00, 0x00)));
+        assert_eq!(entry, [0x01, 0x64, 0xf4, 0x00, 0x00]);
+        assert_eq!(
+            profile_color(&[0x01, 0x64, 0xbf, 0x0b, 0xdc]),
+            Some(Rgb::new(0xbf, 0x0b, 0xdc))
+        );
+        set_profile_color(&mut entry, None);
+        assert_eq!(entry, [0x01, 0x64, 0x00, 0x00, 0x00]);
+        // Leftovers in an unused slot do not make it used.
+        assert!(!profile_in_use(&[0x00, 0x64, 0xf6, 0xff, 0x39]));
+    }
 
     /// Block 0 of profile 1 as read at the start of the captures (600 DPI on
     /// stage 2, 1000 Hz, lift-off low, debounce 2 ms, byte 16 with bit 7 set).

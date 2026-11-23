@@ -15,7 +15,7 @@ use crate::buttons::{Buttons, ENTRIES_LEN, FUNCTIONS_LEN, Layer};
 use crate::color::Rgb;
 use crate::settings::{
     Firmware, Info, LIGHTING_LEN, Lighting, PROFILE_COUNT, PROFILE_ENTRY_LEN, ProfileEntry,
-    SENSOR_LEN, Sensor,
+    SENSOR_LEN, Sensor, UNUSED_PROFILE_ENTRY,
 };
 
 /// USB vendor ID of ROCCAT.
@@ -53,6 +53,12 @@ const CMD_SIGNAL: u8 = 0x70;
 const CMD_LIFT_OFF_CALIBRATION: u8 = 0x08;
 const CMD_LIFT_OFF_CALIBRATION_APPLY: u8 = 0x15;
 const CMD_ENERGY_SAVING: u8 = 0x72;
+const CMD_PAIRING: u8 = 0x09;
+const CMD_RESET: u8 = 0x62;
+
+/// Payload the official software sends with the reset command; its meaning is
+/// unknown. It was the same in two captures.
+const RESET_KEY: [u8; 8] = [0x36, 0x31, 0x18, 0x38, 0x27, 0x98, 0x10, 0x94];
 
 /// Energy saving value for "on"; "off" is 0.
 const ENERGY_SAVING_ON: u8 = 0xaa;
@@ -183,6 +189,24 @@ pub fn write_profile_entry(profile: u8, entry: &ProfileEntry) -> Report {
     payload[0] = profile;
     payload[1..].copy_from_slice(entry);
     request(OP_WRITE, CMD_PROFILE_TABLE, 0, &payload)
+}
+
+/// Marks profile slot `profile` (1–5) as unused, as the official software
+/// does for the slots after the last profile.
+pub fn clear_profile_entry(profile: u8) -> Report {
+    write_profile_entry(profile, &UNUSED_PROFILE_ENTRY)
+}
+
+/// Resets the mouse to its factory settings. The mouse answers after about
+/// 1.5 seconds.
+pub fn reset() -> Report {
+    request(OP_WRITE, CMD_RESET, 0, &RESET_KEY)
+}
+
+/// Puts the dongle into pairing mode (sent to the dongle; the mouse is then
+/// paired by holding its profile button).
+pub fn start_pairing() -> Report {
+    request(OP_WRITE, CMD_PAIRING, 0, &[0x01])
 }
 
 /// Writes settings block 0 of the profile named in its first byte.
@@ -784,6 +808,27 @@ pub(crate) mod tests {
         assert_eq!(
             apply_lift_off_calibration(),
             report_with_prefix(&[0x10, 0x15, 0x01, 0x00, 0x01])
+        );
+    }
+
+    #[test]
+    fn profile_slot_reset_and_pairing_requests_match_captures() {
+        // Captures 61–63: unused slots are written as zero entries.
+        assert_eq!(
+            clear_profile_entry(5),
+            report_with_prefix(&[0x10, 0x11, 0x06, 0x00, 0x05])
+        );
+        // Captures 64 and 65: the same reset command both times.
+        assert_eq!(
+            reset(),
+            report_with_prefix(&[
+                0x10, 0x62, 0x08, 0x00, 0x36, 0x31, 0x18, 0x38, 0x27, 0x98, 0x10, 0x94
+            ])
+        );
+        // Capture 66: sent to the dongle when pairing starts.
+        assert_eq!(
+            start_pairing(),
+            report_with_prefix(&[0x10, 0x09, 0x01, 0x00, 0x01])
         );
     }
 
