@@ -106,24 +106,27 @@ impl Backup {
         text
     }
 
+    /// Format version (1–3) of a backup text, from its first line; `None` if
+    /// it is not a backup. Version 3 (konectl 0.3) is the first with buttons.
+    pub fn format_version(text: &str) -> Option<u8> {
+        match content_lines(text).next() {
+            Some(HEADER) => Some(3),
+            Some(HEADER_V2) => Some(2),
+            Some(HEADER_V1) => Some(1),
+            _ => None,
+        }
+    }
+
     /// Reads a backup written by [`Backup::to_text`]. Empty lines and lines
     /// starting with `#` are ignored.
     pub fn from_text(text: &str) -> Result<Self> {
-        let mut lines = text
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with('#'));
-        let version: u8 = match lines.next() {
-            Some(HEADER) => 3,
-            Some(HEADER_V2) => 2,
-            Some(HEADER_V1) => 1,
-            _ => {
-                return Err(invalid(format!(
-                    "first line must be {HEADER:?} (or {HEADER_V2:?} or {HEADER_V1:?} from \
-                     older konectl versions)"
-                )));
-            }
+        let Some(version) = Self::format_version(text) else {
+            return Err(invalid(format!(
+                "first line must be {HEADER:?} (or {HEADER_V2:?} or {HEADER_V1:?} from \
+                 older konectl versions)"
+            )));
         };
+        let lines = content_lines(text).skip(1);
         let version_1: bool = version == 1;
 
         let mut firmware: Option<Option<Firmware>> = None;
@@ -192,6 +195,13 @@ impl Backup {
             profiles,
         })
     }
+}
+
+/// The lines of a backup text that are not empty or comments, trimmed.
+fn content_lines(text: &str) -> impl Iterator<Item = &str> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
 }
 
 /// The lines of one profile, collected while parsing.
@@ -401,6 +411,17 @@ profile 2 lighting 01 64 64 3c 06 f4 00 00 32 a6 20
         );
         assert_eq!(backup.profiles[1].buttons, None);
         assert_eq!(backup.to_text(), TEXT);
+    }
+
+    #[test]
+    fn tells_the_format_version() {
+        assert_eq!(Backup::format_version(TEXT), Some(3));
+        assert_eq!(Backup::format_version(&version_2_text()), Some(2));
+        assert_eq!(
+            Backup::format_version("# comment\n\nkonectl-backup 1\n"),
+            Some(1)
+        );
+        assert_eq!(Backup::format_version("hello"), None);
     }
 
     #[test]

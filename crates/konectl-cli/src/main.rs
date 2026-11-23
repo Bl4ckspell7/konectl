@@ -1,5 +1,22 @@
 //! `konectl` — command-line front end of the konectl library.
 
+// `println!` and `print!` for this crate: when stdout is closed (e.g.
+// `konectl buttons | head -n 1`), the program ends quietly instead of
+// panicking with "Broken pipe". Defined before the modules that use them.
+macro_rules! println {
+    () => {
+        $crate::write_stdout(format_args!("\n"))
+    };
+    ($($arg:tt)*) => {
+        $crate::write_stdout(format_args!("{}\n", format_args!($($arg)*)))
+    };
+}
+macro_rules! print {
+    ($($arg:tt)*) => {
+        $crate::write_stdout(format_args!($($arg)*))
+    };
+}
+
 #[cfg(target_os = "linux")]
 mod udev;
 
@@ -244,6 +261,8 @@ Functions:
   mute, volume-up, volume-down, play-pause, stop, next-track, previous-track,
   browser-search, browser-stop, browser-refresh,
   consumer:0x0223 (any HID consumer usage)
+  system:sleep, system:wake, system:shut-down   power the computer down,
+                 put it to sleep or wake it
   dpi-cycle, dpi-up, dpi-down, profile-cycle, profile-next, profile-previous,
   profile:N      switch to profile N (1-3)
   easy-shift     hold for the Easy-Shift layer
@@ -452,10 +471,21 @@ fn main() -> Result<()> {
         Command::Udev { .. } => unreachable!("handled above"),
         Command::List => list(&manager)?,
         Command::Battery => match open(&manager)?.battery() {
-            Ok(battery) => match battery.percent() {
-                Some(percent) => println!("{percent}%"),
-                None => println!("unknown (raw {})", battery.raw),
-            },
+            Ok(battery) => {
+                let level: String = battery.percent().map_or_else(
+                    || format!("unknown (raw {})", battery.raw),
+                    |p| format!("{p}%"),
+                );
+                let state: &str = match (battery.charging, battery.cable_power) {
+                    (true, _) => " (charging)",
+                    (false, true) if battery.percent() == Some(100) => {
+                        " (on the cable, fully charged)"
+                    }
+                    (false, true) => " (on the cable)",
+                    (false, false) => "",
+                };
+                println!("{level}{state}");
+            }
             Err(konectl::Error::Rejected { .. }) => {
                 println!("unknown (the mouse is asleep, switched off or out of range)");
             }
@@ -529,18 +559,16 @@ fn main() -> Result<()> {
                         bail!("profile {profile} is active: activate another profile first");
                     }
                     save_safety_backups(&mut mouse)?;
-                    let disabled: usize = mouse.remove_profile(profile).context(undo_hint()?)?;
-                    if profiles.iter().any(|&number| number > profile) {
-                        println!(
-                            "removed profile {profile}; the profiles after it moved down one slot"
-                        );
-                    } else {
-                        println!("removed profile {profile}");
+                    let removed = mouse.remove_profile(profile).context(undo_hint()?)?;
+                    println!("removed profile {profile}");
+                    for (old, new) in &removed.moved {
+                        println!("profile {old} is now profile {new}");
                     }
-                    if disabled > 0 {
+                    if removed.disabled_buttons > 0 {
                         println!(
-                            "{disabled} button functions switched to profile {profile} and are \
-                             now disabled"
+                            "{} button functions switched to profile {profile} and are now \
+                             disabled",
+                            removed.disabled_buttons
                         );
                     }
                 }
@@ -925,6 +953,23 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Exit status after stdout was closed, as for a process ended by SIGPIPE.
+const EXIT_BROKEN_PIPE: i32 = 128 + 13;
+
+/// Writes to stdout. If stdout was closed, the program ends without a
+/// message (status 141, as after SIGPIPE); other errors end it with one.
+fn write_stdout(args: fmt::Arguments<'_>) {
+    let mut stdout = io::stdout().lock();
+    match stdout.write_fmt(args) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::BrokenPipe => std::process::exit(EXIT_BROKEN_PIPE),
+        Err(error) => {
+            eprintln!("Error: could not write the output: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn list(manager: &Manager) -> Result<()> {
     let devices = manager.devices();
     if devices.is_empty() {
@@ -1193,30 +1238,35 @@ fn write_safety_backups(backup: &Backup) -> Result<()> {
 }
 
 /// Adds the current button assignments to an `original.txt` written by
-/// konectl 0.2 or older, once. A file konectl cannot read is left alone.
+/// konectl 0.2 or older, once: the file is then rewritten in the current
+/// format and never completed again. A file konectl cannot read is left alone.
 fn add_buttons_to_original(path: &Path, current: &Backup) -> Result<()> {
     let Ok(text) = fs::read_to_string(path) else {
         return Ok(());
     };
+    if Backup::format_version(&text).is_none_or(|version| version >= 3) {
+        return Ok(());
+    }
     let Ok(original) = Backup::from_text(&text) else {
         return Ok(());
     };
-    let Some(completed) = with_original_buttons(&original, current) else {
-        return Ok(());
-    };
+    let completed: Backup = with_original_buttons(&original, current);
     let temporary: PathBuf = path.with_extension("txt.tmp");
     write_file(&temporary, &completed.to_text())?;
     fs::rename(&temporary, path).with_context(|| format!("could not write {}", path.display()))?;
-    eprintln!("added the current button assignments to {}", path.display());
+    if completed == original {
+        eprintln!("updated {} to the current backup format", path.display());
+    } else {
+        eprintln!("added the current button assignments to {}", path.display());
+    }
     Ok(())
 }
 
 /// `original` with the button assignments of `current` added where it has
-/// none, or `None` if none were missing. konectl 0.2 and older could not
-/// change the buttons, so the current ones are the original ones.
-fn with_original_buttons(original: &Backup, current: &Backup) -> Option<Backup> {
+/// none. konectl 0.2 and older could not change the buttons, so the current
+/// ones are the original ones.
+fn with_original_buttons(original: &Backup, current: &Backup) -> Backup {
     let mut completed: Backup = original.clone();
-    let mut added: bool = false;
     for profile in &mut completed.profiles {
         if profile.buttons.is_some() {
             continue;
@@ -1229,10 +1279,9 @@ fn with_original_buttons(original: &Backup, current: &Backup) -> Option<Backup> 
             .and_then(|candidate| candidate.buttons)
         {
             profile.buttons = Some(buttons);
-            added = true;
         }
     }
-    added.then_some(completed)
+    completed
 }
 
 /// Path of a safety backup file, e.g. `previous.txt`.
@@ -1332,7 +1381,6 @@ fn print_buttons(buttons: &Buttons, active_profile: u8) -> Result<()> {
     println!("profile {profile}{active_note}");
     println!("{:<16}{:<26}easy-shift", "button", "standard");
     let mut swarm_functions: bool = false;
-    let mut system_functions: bool = false;
     let mut macros: bool = false;
     for (button, name) in (1u8..).zip(BUTTON_NAMES) {
         let standard: ButtonAction = buttons.action(button, Layer::Standard)?;
@@ -1344,7 +1392,6 @@ fn print_buttons(buttons: &Buttons, active_profile: u8) -> Result<()> {
         for action in [Some(standard), easy_shift].into_iter().flatten() {
             match action {
                 ButtonAction::Host(HostFunction::Swarm(_)) => swarm_functions = true,
-                ButtonAction::Host(HostFunction::System(_)) => system_functions = true,
                 ButtonAction::Macro(_) => macros = true,
                 _ => {}
             }
@@ -1358,9 +1405,6 @@ fn print_buttons(buttons: &Buttons, active_profile: u8) -> Result<()> {
     }
     if swarm_functions {
         println!("(swarm:… functions only work while the official software runs)");
-    }
-    if system_functions {
-        println!("(whether system:… functions work without the official software is untested)");
     }
     if macros {
         println!("(the mouse cannot report which keys a macro plays)");
@@ -1564,14 +1608,33 @@ profile 1 lighting 01 64 64 46 04 00 ff 00 00 ff 64
 ",
         )
         .expect("original backup");
-        let completed = with_original_buttons(&original, &current).expect("buttons added");
+        let completed = with_original_buttons(&original, &current);
         assert_eq!(completed.profiles[0].buttons, current.profiles[0].buttons);
         assert_eq!(
             completed.profiles[0].settings,
             original.profiles[0].settings
         );
         assert_eq!(completed.dongle_firmware, original.dongle_firmware);
-        assert!(with_original_buttons(&completed, &current).is_none());
+
+        // On disk: completed once, then left alone.
+        let directory: PathBuf =
+            std::env::temp_dir().join(format!("konectl-test-original-{}", std::process::id()));
+        fs::create_dir_all(&directory).expect("temporary directory");
+        let path: PathBuf = directory.join("original.txt");
+        // As konectl 0.2 wrote it (to_text writes the current version).
+        let version_2: String = original
+            .to_text()
+            .replace("konectl-backup 3", "konectl-backup 2");
+        fs::write(&path, version_2).expect("write original");
+        add_buttons_to_original(&path, &current).expect("first completion");
+        let first: String = fs::read_to_string(&path).expect("read");
+        assert_eq!(Backup::format_version(&first), Some(3));
+        assert!(first.contains("profile 1 buttons"));
+        let mut changed = current.clone();
+        changed.profiles[0].buttons = None;
+        add_buttons_to_original(&path, &changed).expect("second call");
+        assert_eq!(fs::read_to_string(&path).expect("read"), first);
+        fs::remove_dir_all(&directory).expect("clean up");
     }
 
     #[test]

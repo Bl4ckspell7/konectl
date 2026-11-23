@@ -242,11 +242,14 @@ impl Buttons {
         Ok(())
     }
 
-    /// Renumbers the buttons that switch to a profile after profile `removed`
-    /// was removed and the later ones moved down one slot: a later profile gets
-    /// its new number, `removed` itself becomes [`ButtonAction::Disabled`].
-    /// Returns how many functions changed and how many of them were disabled.
-    pub(crate) fn renumber_profiles(&mut self, removed: u8) -> (usize, usize) {
+    /// Renumbers the buttons that switch to a profile after profiles moved:
+    /// `new_number` gives a profile's new number, or `None` for a removed
+    /// profile, whose buttons become [`ButtonAction::Disabled`]. Returns how
+    /// many functions changed and how many of them were disabled.
+    pub(crate) fn renumber_profiles(
+        &mut self,
+        new_number: impl Fn(u8) -> Option<u8>,
+    ) -> (usize, usize) {
         let (mut changed, mut disabled) = (0, 0);
         for (button, &slot) in (1u8..).zip(&SLOTS) {
             for layer in [Layer::Standard, Layer::EasyShift] {
@@ -255,13 +258,15 @@ impl Buttons {
                 else {
                     continue;
                 };
-                let renumbered: ButtonAction = if profile > removed {
-                    ButtonAction::Special(Special::Profile(profile - 1))
-                } else if profile == removed {
-                    disabled += 1;
-                    ButtonAction::Disabled
-                } else {
-                    continue;
+                let renumbered: ButtonAction = match new_number(profile) {
+                    None => {
+                        disabled += 1;
+                        ButtonAction::Disabled
+                    }
+                    Some(number) if number != profile => {
+                        ButtonAction::Special(Special::Profile(number))
+                    }
+                    Some(_) => continue,
                 };
                 self.store(slot, layer, renumbered);
                 changed += 1;
@@ -319,6 +324,7 @@ const fn code_index(slot: usize, layer: Layer) -> usize {
 
 /// What a button does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ButtonAction {
     /// Does nothing.
     Disabled,
@@ -332,6 +338,9 @@ pub enum ButtonAction {
     Special(Special),
     /// Easy-Aim with a custom DPI: the DPI while the button is held.
     EasyAim(u16),
+    /// Power down, sleep or wake the computer (sent by the mouse as a HID
+    /// system control).
+    System(SystemControl),
     /// A function the official software carries out on the computer (open a
     /// program, lock the screen, …); the mouse only reports the press.
     Host(HostFunction),
@@ -370,7 +379,9 @@ impl ButtonAction {
                     other
                 }
             }
-            (CODE_ENTRY, [ENTRY_SYSTEM, id, 0]) => Self::Host(HostFunction::System(id)),
+            (CODE_ENTRY, [ENTRY_SYSTEM, id, 0]) => {
+                SystemControl::from_id(id).map_or(other, Self::System)
+            }
             (CODE_ENTRY, [ENTRY_SWARM, id, 0]) => Self::Host(HostFunction::Swarm(id)),
             (CODE_ENTRY, [ENTRY_EASY_AIM, low, high]) => {
                 match u16::from_le_bytes([low, high]).checked_mul(DPI_STEP) {
@@ -401,7 +412,7 @@ impl ButtonAction {
                 let [low, high] = (dpi / DPI_STEP).to_le_bytes();
                 (CODE_ENTRY, [ENTRY_EASY_AIM, low, high])
             }
-            Self::Host(HostFunction::System(id)) => (CODE_ENTRY, [ENTRY_SYSTEM, id, 0]),
+            Self::System(control) => (CODE_ENTRY, [ENTRY_SYSTEM, control.id(), 0]),
             Self::Host(HostFunction::Swarm(id)) => (CODE_ENTRY, [ENTRY_SWARM, id, 0]),
             Self::FactoryDefault => (FACTORY_DEFAULT, [FACTORY_DEFAULT; ENTRY_LEN]),
             Self::Other { code, entry } => (code, entry),
@@ -437,6 +448,7 @@ impl ButtonAction {
                 ))
             }
             Self::EasyAim(_) => Ok(()),
+            Self::System(_) => Ok(()),
             Self::Host(_) => invalid(format!(
                 "{self} is carried out by the official software, not by the mouse; konectl does \
                  not set it"
@@ -489,6 +501,7 @@ impl fmt::Display for ButtonAction {
                 .map_or_else(|| format!("consumer:{usage:#06x}"), str::to_owned),
             Self::Special(special) => special.to_string(),
             Self::EasyAim(dpi) => format!("easy-aim:{dpi}"),
+            Self::System(control) => control.name().to_owned(),
             Self::Host(function) => function.to_string(),
             Self::Macro(mode) => mode.to_string(),
             Self::FactoryDefault => "factory-default".to_owned(),
@@ -507,7 +520,8 @@ impl FromStr for ButtonAction {
     /// Parses the names [`ButtonAction`]'s `Display` writes: `disabled`, a
     /// mouse function (`click`, `back`, …), `key:ctrl+c`, a consumer control
     /// (`volume-up`, `consumer:0x0223`), a special function (`dpi-up`,
-    /// `profile:2`, …) or `easy-aim:<dpi>`. Macros are not parsed here: they
+    /// `profile:2`, …), `easy-aim:<dpi>` or a system control (`system:sleep`,
+    /// `system:wake`, `system:shut-down`). Macros are not parsed here: they
     /// need their keys ([`Macro`](crate::Macro)).
     fn from_str(s: &str) -> Result<Self> {
         if s.starts_with("macro") {
@@ -534,6 +548,12 @@ impl FromStr for ButtonAction {
         }
         if let Some((usage, _)) = CONSUMER_NAMES.iter().find(|(_, name)| *name == s) {
             return Ok(Self::Consumer(*usage));
+        }
+        if let Some(control) = SystemControl::ALL
+            .into_iter()
+            .find(|control| control.name() == s)
+        {
+            return Ok(Self::System(control));
         }
         if let Some(usage) = s.strip_prefix("consumer:") {
             return parse_hex_u16(usage)
@@ -722,18 +742,53 @@ impl fmt::Display for Special {
     }
 }
 
+/// Computer power functions the mouse sends itself, as HID Generic Desktop
+/// system controls (interface 3, report ID 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SystemControl {
+    /// System Power Down (`0x81`).
+    PowerDown,
+    /// System Sleep (`0x82`).
+    Sleep,
+    /// System Wake Up (`0x83`).
+    WakeUp,
+}
+
+impl SystemControl {
+    /// All system controls.
+    pub const ALL: [Self; 3] = [Self::PowerDown, Self::Sleep, Self::WakeUp];
+
+    /// The entry's id, as the official software writes it.
+    const fn id(self) -> u8 {
+        match self {
+            Self::PowerDown => 0x74,
+            Self::Sleep => 0x8e,
+            Self::WakeUp => 0x8f,
+        }
+    }
+
+    fn from_id(id: u8) -> Option<Self> {
+        Self::ALL.into_iter().find(|control| control.id() == id)
+    }
+
+    /// Name as konectl writes it, e.g. `system:sleep`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::PowerDown => "system:shut-down",
+            Self::Sleep => "system:sleep",
+            Self::WakeUp => "system:wake",
+        }
+    }
+}
+
 /// A function the official software carries out when the mouse reports the
 /// press (`90 07`). konectl shows and keeps these but does not set them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostFunction {
-    /// Entry kind `05`: sleep, wake up, shut down.
-    System(u8),
     /// Entry kind `0b`: open programs, documents or websites, lock the
     /// screen, timers, Windows tools.
     Swarm(u8),
 }
-
-const SYSTEM_NAMES: [(u8, &str); 3] = [(0x74, "shut-down"), (0x8e, "sleep"), (0x8f, "wake")];
 const SWARM_NAMES: [(u8, &str); 8] = [
     (0x02, "open-swarm"),
     (0x04, "stop-timer"),
@@ -747,13 +802,10 @@ const SWARM_NAMES: [(u8, &str); 8] = [
 
 impl fmt::Display for HostFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (prefix, id, names): (&str, u8, &[(u8, &str)]) = match self {
-            Self::System(id) => ("system", *id, &SYSTEM_NAMES),
-            Self::Swarm(id) => ("swarm", *id, &SWARM_NAMES),
-        };
-        let text: String = match names.iter().find(|(code, _)| *code == id) {
-            Some((_, name)) => format!("{prefix}:{name}"),
-            None => format!("{prefix}:{id:#04x}"),
+        let Self::Swarm(id) = *self;
+        let text: String = match SWARM_NAMES.iter().find(|(code, _)| *code == id) {
+            Some((_, name)) => format!("swarm:{name}"),
+            None => format!("swarm:{id:#04x}"),
         };
         f.pad(&text)
     }
@@ -1262,12 +1314,33 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn system_controls_are_set_like_the_official_software() {
+        // Capture 79: button 3 sleep, button 6 shut down, button 7 wake.
+        for (button, name, entry) in [
+            (3, "system:sleep", [0x05, 0x8e, 0x00]),
+            (6, "system:shut-down", [0x05, 0x74, 0x00]),
+            (7, "system:wake", [0x05, 0x8f, 0x00]),
+        ] {
+            let (buttons, stored) = set(button, Layer::Standard, name);
+            assert_eq!(stored, entry, "{name}");
+            assert_eq!(
+                buttons
+                    .action(button, Layer::Standard)
+                    .expect("button")
+                    .to_string(),
+                name
+            );
+        }
+        assert!(matches!(
+            ButtonAction::decode(0x40, [0x05, 0x80, 0x00]),
+            ButtonAction::Other { .. }
+        ));
+    }
+
+    #[test]
     fn host_functions_are_shown_and_kept() {
-        // Captures 53/54: sleep, wake, log-off, shut down, lock, Open Swarm.
-        let cases: [(u8, [u8; 3], &str); 6] = [
-            (0x40, [0x05, 0x8e, 0x00], "system:sleep"),
-            (0x40, [0x05, 0x8f, 0x00], "system:wake"),
-            (0x40, [0x05, 0x74, 0x00], "system:shut-down"),
+        // Captures 53/54: log-off, lock, Open Swarm.
+        let cases: [(u8, [u8; 3], &str); 3] = [
             (0x40, [0x0b, 0x25, 0x00], "swarm:lock"),
             (0x40, [0x0b, 0x02, 0x00], "swarm:open-swarm"),
             (0x40, [0x0b, 0x30, 0x00], "swarm:0x30"),
@@ -1399,13 +1472,18 @@ pub(crate) mod tests {
                 .set_action(button, layer, action.parse().expect("action"))
                 .expect("allowed");
         }
-        assert_eq!(buttons.renumber_profiles(2), (2, 1));
+        let after_removing_2 = |profile: u8| match profile {
+            2 => None,
+            3 => Some(2),
+            other => Some(other),
+        };
+        assert_eq!(buttons.renumber_profiles(after_removing_2), (2, 1));
         let shown =
             |button: u8, layer: Layer| buttons.action(button, layer).expect("button").to_string();
         assert_eq!(shown(7, Layer::Standard), "profile:2");
         assert_eq!(shown(3, Layer::Standard), "profile:1");
         assert_eq!(shown(7, Layer::EasyShift), "disabled");
-        assert_eq!(start_buttons().renumber_profiles(1), (0, 0));
+        assert_eq!(start_buttons().renumber_profiles(Some), (0, 0));
     }
 
     #[test]

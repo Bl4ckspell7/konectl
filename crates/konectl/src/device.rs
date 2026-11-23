@@ -194,6 +194,16 @@ impl Manager {
     }
 }
 
+/// What [`KoneProAir::remove_profile`] changed besides removing the profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemovedProfile {
+    /// Profiles that moved to another slot, as (old number, new number).
+    pub moved: Vec<(u8, u8)>,
+    /// Button functions that switched to the removed profile (or to an
+    /// unused slot that another profile moved into) and are now disabled.
+    pub disabled_buttons: usize,
+}
+
 /// An opened ROCCAT Kone Pro Air.
 pub struct KoneProAir<T: Transport> {
     transport: T,
@@ -256,13 +266,16 @@ impl<T: Transport> KoneProAir<T> {
                 return Some(Err(Error::NotReachable));
             }
             match protocol::parse_status(reply, &request) {
-                // A late answer to the bare init request, which shares the header.
-                Some(Status::Error(protocol::INIT_ERROR_CODE)) | None => None,
+                // An answer to a bare init request, which shares the header: a
+                // late one of ours, or one of another program (hidraw gives
+                // every input report to every open handle). The info query
+                // itself has not been seen to fail with this code.
+                Some(Status::Error(protocol::INIT_ERROR_CODE)) => None,
                 Some(Status::Error(code)) => Some(Err(Error::Rejected {
                     command: WHAT,
                     code,
                 })),
-                Some(Status::Accepted) => None,
+                Some(Status::Accepted) | None => None,
             }
         })
     }
@@ -439,14 +452,15 @@ impl<T: Transport> KoneProAir<T> {
         Ok(number)
     }
 
-    /// Removes `profile`, like the official software: the profiles after it
-    /// move down one slot (with their colours), and the last slot is cleared.
-    /// The active profile and the only profile in use cannot be removed.
+    /// Removes `profile`, like the official software: the remaining profiles
+    /// move into slots 1, 2, … (with their colours), and the slots after them
+    /// are cleared. The active profile and the only profile in use cannot be
+    /// removed.
     ///
     /// Buttons that switch to a profile (`profile:N`) are renumbered to keep
     /// pointing at the same profile; those that switched to the removed one are
-    /// disabled. Returns how many were disabled.
-    pub fn remove_profile(&mut self, profile: u8) -> Result<usize> {
+    /// disabled.
+    pub fn remove_profile(&mut self, profile: u8) -> Result<RemovedProfile> {
         let table = self.profile_table()?;
         let in_use: Vec<u8> = (1u8..)
             .zip(&table)
@@ -475,11 +489,23 @@ impl<T: Transport> KoneProAir<T> {
             .copied()
             .filter(|&number| number != profile)
             .collect();
+        let new_number = |old: u8| -> Option<u8> {
+            if old == profile {
+                return None;
+            }
+            match (1u8..).zip(&remaining).find(|(_, number)| **number == old) {
+                Some((target, _)) => Some(target),
+                // An unused slot that a moved profile fills: the button would
+                // switch to that profile, so it is disabled.
+                None if usize::from(old) <= remaining.len() => None,
+                None => Some(old),
+            }
+        };
         let mut writes: Vec<(u8, bool, ProfileEntry, ProfileSettings, Buttons)> = Vec::new();
         let mut disabled: usize = 0;
         for (target, &source) in (1u8..).zip(&remaining) {
             let (settings, mut buttons) = self.read_profile_and_buttons(source)?;
-            let (renumbered, cleared) = buttons.renumber_profiles(profile);
+            let (renumbered, cleared) = buttons.renumber_profiles(new_number);
             disabled += cleared;
             let moves: bool = target != source;
             if moves || renumbered > 0 {
@@ -513,7 +539,14 @@ impl<T: Transport> KoneProAir<T> {
                 )?;
             }
         }
-        Ok(disabled)
+        Ok(RemovedProfile {
+            moved: (1u8..)
+                .zip(&remaining)
+                .filter(|(target, source)| *target != **source)
+                .map(|(target, source)| (*source, target))
+                .collect(),
+            disabled_buttons: disabled,
+        })
     }
 
     /// `false` once the device is gone, e.g. the dongle was unplugged:
@@ -675,9 +708,27 @@ impl<T: Transport> KoneProAir<T> {
 
     /// Checks that `backup` fits the mouse: the firmware versions it records
     /// must match the mouse's, and the dongle's when both are known. Button
-    /// assignments must belong to the profile they are stored with, and the
-    /// active profile must be in the backup.
+    /// assignments must belong to the profile they are stored with, the
+    /// active profile must be in the backup, and every profile must be marked
+    /// in use and appear only once (as [`Backup::from_text`] checks).
     pub fn check_backup(&mut self, backup: &Backup) -> Result<()> {
+        let mut numbers: Vec<u8> = Vec::new();
+        for profile in &backup.profiles {
+            let number: u8 = profile.settings.profile();
+            profile_index(number)
+                .map_err(|_| Error::InvalidBackup(format!("it has a profile numbered {number}")))?;
+            if numbers.contains(&number) {
+                return Err(Error::InvalidBackup(format!(
+                    "it has profile {number} twice"
+                )));
+            }
+            if !profile_in_use(&profile.entry) {
+                return Err(Error::InvalidBackup(format!(
+                    "the table entry of profile {number} marks it as unused"
+                )));
+            }
+            numbers.push(number);
+        }
         if !backup
             .profiles
             .iter()
@@ -1091,7 +1142,7 @@ mod tests {
 
     use super::*;
     use crate::buttons::tests::start_buttons;
-    use crate::buttons::{MacroMode, MouseFunction};
+    use crate::buttons::{MacroMode, MouseFunction, Special};
     use crate::protocol::report_with_prefix;
     use crate::protocol::tests::{
         BUTTON_FUNCTIONS_REPLY, BUTTONS_REPLY, CABLE_INFO_REPLY, EASY_SHIFT_BUTTONS_REPLY,
@@ -1819,7 +1870,13 @@ mod tests {
         batches.extend(write_profile_batches(2, table_with(3)));
         batches.push(vec![accepted(0x11)]);
         let mut mouse = connect(batches);
-        assert_eq!(mouse.remove_profile(2).expect("remove"), 0);
+        assert_eq!(
+            mouse.remove_profile(2).expect("remove"),
+            RemovedProfile {
+                moved: vec![(3, 2)],
+                disabled_buttons: 0
+            }
+        );
 
         let written: &[Report] = &mouse.transport.written[1..];
         assert!(written.contains(&report_with_prefix(&[
@@ -1830,6 +1887,65 @@ mod tests {
         assert_eq!(written.last(), Some(&protocol::clear_profile_entry(3)));
         // The active profile did not move.
         assert!(written.iter().all(|report| report[..2] != [0x10, 0x03]));
+    }
+
+    #[test]
+    fn remove_profile_with_a_gap_renumbers_by_slot() {
+        // Slots 1, 3 and 4 in use, profile 1 active. Profile 1 has buttons
+        // for profile 3 and the empty slot 2; removing 4 moves 3 to 2.
+        let mut table: Report = table_with(4);
+        table[9..14].copy_from_slice(&[0; 5]);
+        let mut buttons_1 = start_buttons();
+        for (button, target) in [(3, 3), (6, 2)] {
+            buttons_1
+                .set_action(
+                    button,
+                    Layer::Standard,
+                    ButtonAction::Special(Special::Profile(target)),
+                )
+                .expect("allowed");
+        }
+        let mut batches = vec![vec![table], vec![report_with_prefix(&INFO_REPLY)]];
+        // Profile 1 (active): read directly.
+        let settings_1 = start_settings();
+        batches.extend([
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![info_reply(&settings_1.sensor)],
+            vec![lighting_reply(&settings_1.lighting)],
+        ]);
+        batches.extend(button_replies(&buttons_1));
+        // Profile 3: selected for reading.
+        let (settings_3, buttons_3) = profile_data(3);
+        batches.extend([
+            vec![report_with_prefix(&INFO_REPLY)],
+            vec![table],
+            vec![accepted(0x13)],
+            vec![info_reply(&settings_3.sensor)],
+            vec![lighting_reply(&settings_3.lighting)],
+        ]);
+        batches.extend(button_replies(&buttons_3));
+        batches.push(vec![accepted(0x13)]);
+        // Profile 1's entry, block 0 and blocks 2-4 are accepted; the read-back
+        // after them is not answered, so the plan is checked up to there.
+        batches.push(vec![accepted(0x11)]);
+        batches.extend(vec![vec![accepted(0x50)]; 4]);
+        let mut mouse = connect(batches);
+        let _ = mouse.remove_profile(4);
+
+        let written: &[Report] = &mouse.transport.written[1..];
+        let entry_write: usize = written
+            .iter()
+            .position(|report| report[..2] == [0x10, 0x11])
+            .expect("profile 1 is written first");
+        assert_eq!(written[entry_write][4], 1);
+        let button_functions: Report = *written
+            .iter()
+            .find(|report| report[..4] == [0x10, 0x50, 0x1c, 0x02])
+            .expect("block 2 of profile 1");
+        // Button 3 (slot 1): profile 3 -> 2; button 6 (slot 5): the empty
+        // slot 2 is filled by profile 3, so it is disabled.
+        assert_eq!(button_functions[4 + 2], 0x49);
+        assert_eq!(button_functions[4 + 4], 0x00);
     }
 
     #[test]
@@ -1993,6 +2109,7 @@ mod tests {
 
     #[test]
     fn late_init_reply_is_skipped_by_the_info_query() {
+        // A late init answer, or one of another program on the same device.
         let late_init: Report = init_reply();
         let mut mouse = connect(vec![vec![late_init, report_with_prefix(&INFO_REPLY)]]);
         assert_eq!(mouse.info().expect("info").sensor.profile(), 1);
@@ -2033,6 +2150,22 @@ mod tests {
             ..start_backup()
         };
         connect(vec![vec![report_with_prefix(info_reply)]]).check_backup(&backup)
+    }
+
+    #[test]
+    fn backup_profiles_must_be_in_use_and_unique() {
+        let mut unused = start_backup();
+        unused.profiles[0].entry = [0; 5];
+        let mut twice = start_backup();
+        twice.profiles.push(twice.profiles[0]);
+        for backup in [unused, twice] {
+            let mut mouse = connect(vec![]);
+            assert!(matches!(
+                mouse.check_backup(&backup),
+                Err(Error::InvalidBackup(_))
+            ));
+            assert_eq!(mouse.transport.written.len(), 1);
+        }
     }
 
     #[test]

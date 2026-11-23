@@ -233,7 +233,7 @@ button); the blocks store them in another order:
 | `01 MM KK`          | key: HID keyboard usage `KK` with the HID modifier mask `MM` (`01` Ctrl, `02` Shift, `04` Alt, `08` Win); `KK` = `00` for modifiers alone ("Left ctrl" is `01 01 00`) |
 | `02 LL HH`          | consumer control, little-endian HID usage: `e2` mute, `e9`/`ea` volume up/down, `b5`/`b6` next/previous track, `b7` stop, `cd` play/pause, `0221` browser search, `0226` browser stop, `0227` browser refresh |
 | `0c LL HH`          | Easy-Aim with a custom DPI, little-endian in steps of 50 (`2c 01` = 15000) |
-| `05 NN 00`          | system: `8e` sleep, `8f` wake, `74` shut down       |
+| `05 NN 00`          | system control, sent by the mouse itself: `74` power down, `8e` sleep, `8f` wake up (see below) |
 | `0b NN 00`          | carried out by Swarm: `02` open Swarm, `04` stop timer, `07` open website, `23` hibernate, `24` reboot, `25` lock, `26` log off, `29` task manager |
 
 Swarm's "Browser backwards" and "Browser forwards" are the mouse functions `04`
@@ -243,8 +243,13 @@ are key entries.
 When a button with a `0b` entry is pressed, the mouse sends
 `90 07 04 00 <code> <entry> <slot>` on the vendor channel (`90 07 04 00 40 0b
 02 04` for "Open Swarm" on slot 4) and Swarm carries out the function. The
-website, file or program to open is stored in Swarm only. The `05` entries were
-not tested this way.
+website, file or program to open is stored in Swarm only.
+
+The `05` entries work without Swarm: the mouse sends them as HID Generic
+Desktop System Control on its interface 3 (report ID 1, one bit each for
+System Power Down `0x81`, Sleep `0x82` and Wake Up `0x83`). With Swarm closed,
+pressing the buttons sent `01 01 00`, `01 02 00` and `01 04 00`, each followed by
+`01 00 00` on release, and *power down* shut Windows down.
 
 What Swarm offers (konectl follows it):
 
@@ -384,9 +389,11 @@ was plugged in again and checks that the mouse answers through it.
 |---------------|-----------------------------|
 | 0–1           | `90 0a` (echo)              |
 | 10            | battery level, percent (values > 100 *unknown*; konectl reports them as unknown) |
-| 4, 6          | `01` on cable, `00` on battery; charging flag? |
+| 4             | `01` while the mouse is powered over the cable |
+| 5             | battery level in steps of 10 % (`32` at 54 %, `5a` at 90 %) |
+| 6             | `01` while the battery charges; `00` on battery and once it is full on the cable |
 | 8–9           | little-endian; 2788–2789 on battery, 2866 charging; voltage-related? |
-| 2, 5          | `04` (payload length) and *unknown* (`32` so far) |
+| 2             | `04` (payload length)       |
 
 Observed answers:
 
@@ -396,6 +403,7 @@ Observed answers:
 | dongle, 50 %        | `90 0a 04 00 00 32 00 00 e5 0a 32 00 …`   |
 | cable (charging), 50 % | `90 0a 04 00 01 32 01 00 32 0b 32 00 …` |
 | cable (charging), 90 % | `90 0a 04 00 01 5a 01 00 fb 0b 5a 00 …` |
+| cable, full, 100 %  | `90 0a 04 00 01 64 00 00 f3 0b 64 00 …` |
 
 ### Signal: `90 70`
 

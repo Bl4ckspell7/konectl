@@ -11,7 +11,7 @@ to the mouse directly over hidraw.
 
 | Feature                                   | State |
 |-------------------------------------------|-------|
-| Battery level, wireless signal            | ✅     |
+| Battery level and charging, wireless signal | ✅   |
 | DPI stages and active stage               | ✅     |
 | Polling rate, lift-off distance           | ✅     |
 | Angle snapping, debounce time             | ✅     |
@@ -71,7 +71,7 @@ it is also in the repository as `udev/70-konectl.rules`.
 
 ```sh
 konectl list                    # connected devices
-konectl battery                 # e.g. 87%
+konectl battery                 # e.g. 87%, or 90% (charging) on the cable
 konectl signal                  # e.g. 92% (raw 36)
 
 konectl settings                # settings of the active profile

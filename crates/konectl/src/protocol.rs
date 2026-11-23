@@ -110,6 +110,10 @@ const LED_HEADER: [u8; 9] = [
 
 const BATTERY_LEN: u8 = 0x04;
 const BATTERY_OFFSET: usize = 10;
+/// `01` while the mouse is powered over the USB cable.
+const BATTERY_CABLE_POWER_OFFSET: usize = 4;
+/// `01` while the battery charges (`00` once it is full).
+const BATTERY_CHARGING_OFFSET: usize = 6;
 const SIGNAL_OFFSET: usize = 4;
 /// Raw signal value reported while the radio is switched off.
 const SIGNAL_RADIO_OFF: u8 = 236;
@@ -488,14 +492,21 @@ pub fn parse_profile_table(report: &Report) -> Option<[ProfileEntry; PROFILE_COU
 pub fn parse_battery(report: &Report) -> Option<Battery> {
     is_data_reply(report, CMD_BATTERY, BATTERY_LEN).then(|| Battery {
         raw: report[BATTERY_OFFSET],
+        cable_power: report[BATTERY_CABLE_POWER_OFFSET] == 0x01,
+        charging: report[BATTERY_CHARGING_OFFSET] == 0x01,
     })
 }
 
 /// Battery state as reported by the mouse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Battery {
     /// Raw battery byte; 0–100 is a percentage, other values are not understood yet.
     pub raw: u8,
+    /// The mouse is powered over the USB cable.
+    pub cable_power: bool,
+    /// The battery is charging (on the cable, until it is full).
+    pub charging: bool,
 }
 
 impl Battery {
@@ -780,6 +791,19 @@ pub(crate) mod tests {
         let battery = parse_battery(&reply).expect("battery reply");
         assert_eq!(battery.raw, 54);
         assert_eq!(battery.percent(), Some(54));
+        assert!(!battery.cable_power && !battery.charging);
+        // Over the cable at 90 % (charging) and at 100 % (full).
+        let charging = parse_battery(&report_with_prefix(&[
+            0x90, 0x0a, 0x04, 0x00, 0x01, 0x5a, 0x01, 0x00, 0xfb, 0x0b, 0x5a,
+        ]))
+        .expect("battery reply");
+        assert!(charging.cable_power && charging.charging);
+        let full = parse_battery(&report_with_prefix(&[
+            0x90, 0x0a, 0x04, 0x00, 0x01, 0x64, 0x00, 0x00, 0xf3, 0x0b, 0x64,
+        ]))
+        .expect("battery reply");
+        assert!(full.cable_power && !full.charging);
+        assert_eq!(full.percent(), Some(100));
     }
 
     #[test]
@@ -794,9 +818,14 @@ pub(crate) mod tests {
 
     #[test]
     fn battery_out_of_range_is_not_a_percentage() {
-        assert_eq!(Battery { raw: 100 }.percent(), Some(100));
-        assert_eq!(Battery { raw: 101 }.percent(), None);
-        assert_eq!(Battery { raw: 0xff }.percent(), None);
+        let battery = |raw: u8| Battery {
+            raw,
+            cable_power: false,
+            charging: false,
+        };
+        assert_eq!(battery(100).percent(), Some(100));
+        assert_eq!(battery(101).percent(), None);
+        assert_eq!(battery(0xff).percent(), None);
     }
 
     #[test]
