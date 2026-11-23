@@ -242,11 +242,14 @@ impl Buttons {
         Ok(())
     }
 
-    /// Renumbers the buttons that switch to a profile after profile `removed`
-    /// was removed and the later ones moved down one slot: a later profile gets
-    /// its new number, `removed` itself becomes [`ButtonAction::Disabled`].
-    /// Returns how many functions changed and how many of them were disabled.
-    pub(crate) fn renumber_profiles(&mut self, removed: u8) -> (usize, usize) {
+    /// Renumbers the buttons that switch to a profile after profiles moved:
+    /// `new_number` gives a profile's new number, or `None` for a removed
+    /// profile, whose buttons become [`ButtonAction::Disabled`]. Returns how
+    /// many functions changed and how many of them were disabled.
+    pub(crate) fn renumber_profiles(
+        &mut self,
+        new_number: impl Fn(u8) -> Option<u8>,
+    ) -> (usize, usize) {
         let (mut changed, mut disabled) = (0, 0);
         for (button, &slot) in (1u8..).zip(&SLOTS) {
             for layer in [Layer::Standard, Layer::EasyShift] {
@@ -255,13 +258,15 @@ impl Buttons {
                 else {
                     continue;
                 };
-                let renumbered: ButtonAction = if profile > removed {
-                    ButtonAction::Special(Special::Profile(profile - 1))
-                } else if profile == removed {
-                    disabled += 1;
-                    ButtonAction::Disabled
-                } else {
-                    continue;
+                let renumbered: ButtonAction = match new_number(profile) {
+                    None => {
+                        disabled += 1;
+                        ButtonAction::Disabled
+                    }
+                    Some(number) if number != profile => {
+                        ButtonAction::Special(Special::Profile(number))
+                    }
+                    Some(_) => continue,
                 };
                 self.store(slot, layer, renumbered);
                 changed += 1;
@@ -1399,13 +1404,18 @@ pub(crate) mod tests {
                 .set_action(button, layer, action.parse().expect("action"))
                 .expect("allowed");
         }
-        assert_eq!(buttons.renumber_profiles(2), (2, 1));
+        let after_removing_2 = |profile: u8| match profile {
+            2 => None,
+            3 => Some(2),
+            other => Some(other),
+        };
+        assert_eq!(buttons.renumber_profiles(after_removing_2), (2, 1));
         let shown =
             |button: u8, layer: Layer| buttons.action(button, layer).expect("button").to_string();
         assert_eq!(shown(7, Layer::Standard), "profile:2");
         assert_eq!(shown(3, Layer::Standard), "profile:1");
         assert_eq!(shown(7, Layer::EasyShift), "disabled");
-        assert_eq!(start_buttons().renumber_profiles(1), (0, 0));
+        assert_eq!(start_buttons().renumber_profiles(Some), (0, 0));
     }
 
     #[test]

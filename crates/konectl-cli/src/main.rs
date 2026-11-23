@@ -529,18 +529,16 @@ fn main() -> Result<()> {
                         bail!("profile {profile} is active: activate another profile first");
                     }
                     save_safety_backups(&mut mouse)?;
-                    let disabled: usize = mouse.remove_profile(profile).context(undo_hint()?)?;
-                    if profiles.iter().any(|&number| number > profile) {
-                        println!(
-                            "removed profile {profile}; the profiles after it moved down one slot"
-                        );
-                    } else {
-                        println!("removed profile {profile}");
+                    let removed = mouse.remove_profile(profile).context(undo_hint()?)?;
+                    println!("removed profile {profile}");
+                    for (old, new) in &removed.moved {
+                        println!("profile {old} is now profile {new}");
                     }
-                    if disabled > 0 {
+                    if removed.disabled_buttons > 0 {
                         println!(
-                            "{disabled} button functions switched to profile {profile} and are \
-                             now disabled"
+                            "{} button functions switched to profile {profile} and are now \
+                             disabled",
+                            removed.disabled_buttons
                         );
                     }
                 }
