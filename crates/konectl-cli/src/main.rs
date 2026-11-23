@@ -15,12 +15,12 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use konectl::buttons::{BUTTON_COUNT, HostFunction, Special};
+use konectl::buttons::{BUTTON_COUNT, HostFunction, MACRO_REPEAT_MAX, Special};
 use konectl::protocol::{REPORT_LEN, Report, VENDOR_ID};
 use konectl::settings::{DEBOUNCE_MAX_MS, PROFILE_COUNT, profile_color, profile_in_use};
 use konectl::{
     Backup, ButtonAction, Buttons, ConnectionMode, Effect, HidTransport, KoneProAir, Layer,
-    LiftOff, Manager, PollingRate, ProfileSettings, Rgb,
+    LiftOff, Macro, MacroMode, Manager, PollingRate, ProfileSettings, Rgb,
 };
 
 /// Configure a ROCCAT Kone Pro Air mouse (unofficial).
@@ -171,11 +171,25 @@ enum Command {
         /// down, 6 front side button, 7 rear side button, 8 profile button.
         #[arg(value_parser = clap::value_parser!(u8).range(1..=i64::from(BUTTON_COUNT)))]
         button: u8,
-        /// Function, e.g. back, dpi-up, key:ctrl+c or volume-up (see --help for the list).
-        action: ButtonAction,
+        /// Function, e.g. back, dpi-up, key:ctrl+c, volume-up, or a macro such as
+        /// 'macro:ctrl+c, 50ms, ctrl+v' (see --help for the list).
+        action: ButtonArg,
         /// Set the function used while an Easy-Shift button is held.
         #[arg(short, long)]
         easy_shift: bool,
+        /// Macros: play it this many times per press (1–99, default 1).
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..=i64::from(MACRO_REPEAT_MAX)),
+              conflicts_with_all = ["while_pressed", "toggle"])]
+        repeat: Option<u8>,
+        /// Macros: play it over and over while the button is held.
+        #[arg(long, conflicts_with = "toggle")]
+        while_pressed: bool,
+        /// Macros: start it with a press and stop it with the next one.
+        #[arg(long)]
+        toggle: bool,
+        /// Macros: do not ask before replacing a macro that other profiles play.
+        #[arg(long)]
+        yes: bool,
         #[command(flatten)]
         target: ProfileArg,
     },
@@ -239,10 +253,37 @@ Functions:
                  hold and turn the wheel to change the DPI, the volume, or the
                  window
 
-Limits, as in the official software: button 1 stays click; button 8 takes only
+  macro:KEYS     a macro the mouse plays by itself: comma-separated keys with
+                 modifiers (ctrl+c, a, f5), down:KEY / up:KEY for a single
+                 press or release, and delays such as 50ms (default 20 ms
+                 between key events; at most 100 events). Example:
+                 'macro:ctrl+c, 50ms, ctrl+v'. With --repeat N, --while-pressed
+                 or --toggle. The mouse cannot report a macro back.
+
+Limits, as in the official software: button 1 stays click, and right click
+(menu) stays on at least one button; button 8 takes only
 the dpi-* and profile-* functions and has no Easy-Shift function; the wheel
 (4, 5) takes no easy-* functions; an Easy-Shift button has no Easy-Shift
-function.";
+function; only buttons 1, 2, 3, 6 and 7 play macros (button 1 only in the
+Easy-Shift layer).";
+
+/// A button function, or a macro.
+#[derive(Debug, Clone)]
+enum ButtonArg {
+    Action(ButtonAction),
+    Macro(Macro),
+}
+
+impl FromStr for ButtonArg {
+    type Err = konectl::Error;
+
+    fn from_str(s: &str) -> konectl::Result<Self> {
+        match s.strip_prefix("macro:") {
+            Some(keys) => keys.parse().map(Self::Macro),
+            None => s.parse().map(Self::Action),
+        }
+    }
+}
 
 #[derive(Debug, Subcommand)]
 enum ProfileAction {
@@ -683,10 +724,82 @@ fn main() -> Result<()> {
         }
         Command::Button {
             button,
-            action,
+            action: ButtonArg::Macro(macro_),
             easy_shift,
+            repeat,
+            while_pressed,
+            toggle,
+            yes,
             target,
         } => {
+            let layer: Layer = if easy_shift {
+                Layer::EasyShift
+            } else {
+                Layer::Standard
+            };
+            let mode: MacroMode = if while_pressed {
+                MacroMode::WhilePressed
+            } else if toggle {
+                MacroMode::Toggle
+            } else {
+                MacroMode::OnPress {
+                    repeat: repeat.unwrap_or(1),
+                }
+            };
+            let mut mouse = open(&manager)?;
+            let mut buttons: Buttons = mouse.buttons(target.profile)?;
+            buttons.set_action(button, layer, ButtonAction::Macro(mode))?;
+            let active_profile: u8 = mouse.active_profile()?;
+            // The macro on the mouse cannot be read, so it is always written.
+            let backup: Backup = mouse.backup()?;
+            let shared: Vec<String> = backup
+                .profiles
+                .iter()
+                .filter(|profile| profile.settings.profile() != buttons.profile())
+                .filter(|profile| {
+                    profile.buttons.is_some_and(|other| {
+                        matches!(other.action(button, layer), Ok(ButtonAction::Macro(_)))
+                    })
+                })
+                .map(|profile| profile.settings.profile().to_string())
+                .collect();
+            if !shared.is_empty() {
+                println!(
+                    "The mouse keeps one macro per button for all profiles: profile {} plays \
+                     the macro on this button too, and its keys would be replaced (they cannot \
+                     be read back).",
+                    shared.join(", ")
+                );
+                if !yes && !confirm("Replace it?")? {
+                    println!("cancelled");
+                    return Ok(());
+                }
+            }
+            write_safety_backups(&backup)?;
+            mouse
+                .write_macro(&buttons, button, layer, &macro_)
+                .with_context(|| {
+                    format!(
+                        "the macro may be incomplete: write it again, or give button {button} \
+                         another function"
+                    )
+                })?;
+            println!("wrote a macro of {} key events", macro_.events().len());
+            print_buttons(&buttons, active_profile)?;
+        }
+        Command::Button {
+            button,
+            action: ButtonArg::Action(action),
+            easy_shift,
+            repeat,
+            while_pressed,
+            toggle,
+            yes,
+            target,
+        } => {
+            if repeat.is_some() || while_pressed || toggle || yes {
+                bail!("--repeat, --while-pressed, --toggle and --yes are for macros (macro:…)");
+            }
             let layer: Layer = if easy_shift {
                 Layer::EasyShift
             } else {
@@ -1220,6 +1333,7 @@ fn print_buttons(buttons: &Buttons, active_profile: u8) -> Result<()> {
     println!("{:<16}{:<26}easy-shift", "button", "standard");
     let mut swarm_functions: bool = false;
     let mut system_functions: bool = false;
+    let mut macros: bool = false;
     for (button, name) in (1u8..).zip(BUTTON_NAMES) {
         let standard: ButtonAction = buttons.action(button, Layer::Standard)?;
         let easy_shift: Option<ButtonAction> = if buttons.has_easy_shift_function(button)? {
@@ -1231,6 +1345,7 @@ fn print_buttons(buttons: &Buttons, active_profile: u8) -> Result<()> {
             match action {
                 ButtonAction::Host(HostFunction::Swarm(_)) => swarm_functions = true,
                 ButtonAction::Host(HostFunction::System(_)) => system_functions = true,
+                ButtonAction::Macro(_) => macros = true,
                 _ => {}
             }
         }
@@ -1246,6 +1361,9 @@ fn print_buttons(buttons: &Buttons, active_profile: u8) -> Result<()> {
     }
     if system_functions {
         println!("(whether system:… functions work without the official software is untested)");
+    }
+    if macros {
+        println!("(the mouse cannot report which keys a macro plays)");
     }
     Ok(())
 }
@@ -1474,6 +1592,29 @@ profile 1 lighting 01 64 64 46 04 00 ff 00 00 ff 64
         assert!(parse(&["konectl", "reset", "--yes"]).is_ok());
         assert!(parse(&["konectl", "pair", "--yes"]).is_ok());
         assert_eq!("none".parse::<ProfileColor>(), Ok(ProfileColor(None)));
+    }
+
+    #[test]
+    fn parses_macro_buttons() {
+        let parse = |args: &[&str]| Cli::try_parse_from(args).map(|_| ());
+        assert!(parse(&["konectl", "button", "7", "macro:ctrl+c, 50ms, ctrl+v"]).is_ok());
+        assert!(parse(&["konectl", "button", "7", "macro:a", "--repeat", "3"]).is_ok());
+        assert!(parse(&["konectl", "button", "7", "macro:a", "--while-pressed"]).is_ok());
+        assert!(parse(&["konectl", "button", "7", "macro:a", "--toggle", "-e"]).is_ok());
+        assert!(parse(&["konectl", "button", "7", "macro:a", "--repeat", "100"]).is_err());
+        assert!(
+            parse(&[
+                "konectl",
+                "button",
+                "7",
+                "macro:a",
+                "--toggle",
+                "--while-pressed"
+            ])
+            .is_err()
+        );
+        assert!(parse(&["konectl", "button", "7", "macro:"]).is_err());
+        assert!(parse(&["konectl", "button", "7", "macro:50ms"]).is_err());
     }
 
     #[test]
