@@ -50,6 +50,11 @@
       "schedule": ["* * 1 * *"]
     },
     {
+      "description": "The Slint UI compiler (slint-build) must match the runtime (slint).",
+      "matchPackageNames": ["slint", "slint-build"],
+      "groupName": "slint"
+    },
+    {
       "matchDepNames": ["docker.io/library/archlinux"],
       "versioning": "regex:^(?<compatibility>base)-(?<major>\\d{8})\\.(?<minor>\\d+)\\.(?<patch>\\d+)$"
     }
