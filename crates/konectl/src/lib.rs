@@ -28,14 +28,20 @@ mod color;
 mod device;
 mod error;
 pub mod macros;
+pub mod pairing;
 pub mod protocol;
+pub mod safety;
 pub mod settings;
 mod transport;
+#[cfg(target_os = "linux")]
+pub mod udev;
 
 pub use backup::{Backup, ProfileBackup};
 pub use buttons::{ButtonAction, Buttons, Layer, MacroMode, SystemControl};
 pub use color::{ParseRgbError, Rgb};
-pub use device::{ConnectionMode, DeviceInfo, KoneProAir, Manager, RemovedProfile};
+pub use device::{
+    ConnectionMode, DeviceInfo, KoneProAir, LIFT_OFF_CALIBRATION_SECONDS, Manager, RemovedProfile,
+};
 pub use error::{Error, Result};
 pub use macros::{Macro, MacroEvent};
 pub use protocol::{Battery, Report, Signal};

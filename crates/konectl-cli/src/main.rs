@@ -20,24 +20,27 @@ macro_rules! print {
 #[cfg(target_os = "linux")]
 mod udev;
 
-use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::io::ErrorKind;
 use std::io::{self, IsTerminal as _, Write as _};
-use std::path::{Path, PathBuf};
+use std::ops::ControlFlow;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use konectl::buttons::{BUTTON_COUNT, HostFunction, MACRO_REPEAT_MAX, Special};
+use konectl::pairing::{self, PairingStep};
 use konectl::protocol::{REPORT_LEN, Report, VENDOR_ID};
+use konectl::safety::{OriginalBackup, SafetyBackups};
 use konectl::settings::{DEBOUNCE_MAX_MS, PROFILE_COUNT, profile_color, profile_in_use};
 use konectl::{
-    Backup, ButtonAction, Buttons, ConnectionMode, Effect, HidTransport, KoneProAir, Layer,
-    LiftOff, Macro, MacroMode, Manager, PollingRate, ProfileSettings, Rgb,
+    Backup, ButtonAction, Buttons, ConnectionMode, Effect, HidTransport, KoneProAir,
+    LIFT_OFF_CALIBRATION_SECONDS, Layer, LiftOff, Macro, MacroMode, Manager, PollingRate,
+    ProfileSettings, Rgb,
 };
 
 /// Configure a ROCCAT Kone Pro Air mouse (unofficial).
@@ -459,7 +462,7 @@ fn main() -> Result<()> {
             UdevAction::Uninstall => udev::uninstall(),
             UdevAction::Status => udev::status(),
             UdevAction::Rule => {
-                print!("{}", udev::RULE);
+                print!("{}", konectl::udev::RULE);
                 Ok(())
             }
         };
@@ -872,7 +875,7 @@ fn main() -> Result<()> {
             println!(
                 "to undo: konectl restore {} (energy saving and the lift-off calibration are \
                  not in it)",
-                safety_backup_path("previous.txt")?.display()
+                SafetyBackups::from_env()?.previous_path().display()
             );
         }
         Command::Pair { yes } => pair(&mut manager, yes)?,
@@ -1003,11 +1006,6 @@ fn open_error(error: konectl::Error) -> anyhow::Error {
     }
 }
 
-/// How long `konectl pair` waits for each step of the dongle's replug.
-const PAIRING_REPLUG_WAIT: Duration = Duration::from_secs(180);
-/// How long it then waits for the mouse to answer through the dongle.
-const PAIRING_CONNECT_WAIT: Duration = Duration::from_secs(15);
-
 /// Puts the dongle into pairing mode, shows the steps, waits until the dongle
 /// was plugged in again and checks that the mouse answers through it.
 fn pair(manager: &mut Manager, yes: bool) -> Result<()> {
@@ -1026,70 +1024,40 @@ fn pair(manager: &mut Manager, yes: bool) -> Result<()> {
     println!("  2. Hold the profile button (button 8) for 3 seconds.");
     println!("  3. When the lighting effect has finished, unplug the dongle and plug it in again.");
     println!("Waiting for the dongle to be plugged in again …");
+    let mut last_step: PairingStep = PairingStep::Unplug;
+    let paired = pairing::finish_pairing(manager, dongle, |step| {
+        last_step = step;
+        ControlFlow::Continue(())
+    });
     let not_replugged = "the dongle stays in pairing mode until it is plugged in again";
-    // The opened dongle stops working once it is unplugged, however quickly it
-    // comes back.
-    let deadline: Instant = Instant::now() + PAIRING_REPLUG_WAIT;
-    while dongle.is_present() {
-        if Instant::now() >= deadline {
-            return Err(anyhow::anyhow!(
-                "the dongle was not unplugged within {} seconds",
-                PAIRING_REPLUG_WAIT.as_secs()
+    match paired {
+        Ok(_) => {
+            println!("paired: the mouse answers through the dongle");
+            Ok(())
+        }
+        Err(konectl::Error::NotReplugged) => {
+            let missed: &str = if last_step == PairingStep::Unplug {
+                "unplugged"
+            } else {
+                "plugged in again"
+            };
+            Err(anyhow::anyhow!(
+                "the dongle was not {missed} within {} seconds",
+                pairing::REPLUG_WAIT.as_secs()
             ))
-            .context(not_replugged);
+            .context(not_replugged)
         }
-        thread::sleep(Duration::from_millis(200));
+        Err(error) if last_step == PairingStep::Connect => Err(open_error(error))
+            .context("the mouse does not answer through the dongle: move it, or pair again"),
+        Err(error) => Err(error).context(not_replugged),
     }
-    drop(dongle);
-    wait_for_dongle(manager).context(not_replugged)?;
-
-    // The mouse needs a moment to connect, and the new device node to get
-    // its permissions.
-    let deadline: Instant = Instant::now() + PAIRING_CONNECT_WAIT;
-    loop {
-        let answered = manager
-            .open_mode(ConnectionMode::Wireless)
-            .and_then(|mut mouse| mouse.info());
-        match answered {
-            Ok(_) => {
-                println!("paired: the mouse answers through the dongle");
-                return Ok(());
-            }
-            Err(error) if Instant::now() >= deadline => {
-                return Err(open_error(error)).context(
-                    "the mouse does not answer through the dongle: move it, or pair again",
-                );
-            }
-            Err(_) => thread::sleep(Duration::from_millis(500)),
-        }
-    }
-}
-
-/// Waits until a dongle is connected.
-fn wait_for_dongle(manager: &mut Manager) -> Result<()> {
-    let deadline: Instant = Instant::now() + PAIRING_REPLUG_WAIT;
-    while Instant::now() < deadline {
-        manager.refresh()?;
-        if manager
-            .devices()
-            .iter()
-            .any(|device| device.mode == ConnectionMode::Wireless)
-        {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(300));
-    }
-    bail!(
-        "the dongle was not plugged in again within {} seconds",
-        PAIRING_REPLUG_WAIT.as_secs()
-    )
 }
 
 /// How to undo a change that failed halfway.
 fn undo_hint() -> Result<String> {
     Ok(format!(
         "to go back to the settings before this command: konectl restore {}",
-        safety_backup_path("previous.txt")?.display()
+        SafetyBackups::from_env()?.previous_path().display()
     ))
 }
 
@@ -1126,10 +1094,6 @@ fn confirm(question: &str) -> Result<bool> {
     ))
 }
 
-/// Seconds the mouse has to be moved during the lift-off calibration (the
-/// official software asks for 10).
-const CALIBRATION_SECONDS: u64 = 12;
-
 /// Runs the lift-off calibration, then uses the measured distance in every
 /// profile, as the official software does.
 fn calibrate_lift_off(manager: &Manager) -> Result<()> {
@@ -1139,7 +1103,9 @@ fn calibrate_lift_off(manager: &Manager) -> Result<()> {
     let mut mouse = open(manager)?;
     save_safety_backups(&mut mouse)?;
     println!("Put the mouse on the surface you use. After you press Enter, move it");
-    println!("continuously for {CALIBRATION_SECONDS} seconds. If the calibration is interrupted,");
+    println!(
+        "continuously for {LIFT_OFF_CALIBRATION_SECONDS} seconds. If the calibration is interrupted,"
+    );
     print!("run it again, or go back with `konectl liftoff low`. ");
     io::stdout().flush()?;
     let read: usize = io::stdin()
@@ -1150,21 +1116,14 @@ fn calibrate_lift_off(manager: &Manager) -> Result<()> {
     }
 
     mouse.start_lift_off_calibration()?;
-    for remaining in (1..=CALIBRATION_SECONDS).rev() {
+    for remaining in (1..=LIFT_OFF_CALIBRATION_SECONDS).rev() {
         print!("\rkeep moving the mouse … {remaining:2} s ");
         io::stdout().flush()?;
         thread::sleep(Duration::from_secs(1));
     }
     println!("\rcalibration done                ");
     mouse.finish_lift_off_calibration()?;
-
-    for profile in mouse.profiles()? {
-        let mut sensor = mouse.settings(Some(profile))?.sensor;
-        if sensor.lift_off() != LiftOff::Custom {
-            sensor.set_lift_off(LiftOff::Custom)?;
-            mouse.write_sensor(&sensor)?;
-        }
-    }
+    mouse.set_lift_off_all(LiftOff::Custom)?;
     println!("lift-off is now custom (calibrated) in all profiles");
     Ok(())
 }
@@ -1185,12 +1144,7 @@ fn change(
         println!("unchanged");
     } else {
         save_safety_backups(&mut mouse)?;
-        if settings.lighting == current.lighting {
-            // Leaves the saved lighting alone; with AIMO it could not be read.
-            mouse.write_sensor(&settings.sensor)?;
-        } else {
-            mouse.write_settings(&settings)?;
-        }
+        mouse.write_changes(&current, &settings)?;
     }
     print_settings(&settings, active_profile);
     Ok(())
@@ -1205,101 +1159,27 @@ fn save_safety_backups(mouse: &mut KoneProAir<HidTransport>) -> Result<()> {
 /// Writes a backup as `previous.txt`, and as `original.txt` if that does not
 /// exist yet. An `original.txt` without button assignments gets the current ones.
 fn write_safety_backups(backup: &Backup) -> Result<()> {
-    let text: &str = &backup.to_text();
-    let directory: PathBuf =
-        state_directory(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))?;
-    fs::create_dir_all(&directory)
-        .with_context(|| format!("could not create {}", directory.display()))?;
-
-    // Both files are written to a temporary file first, so an interrupted
-    // write never leaves a truncated backup behind.
-    let original: PathBuf = directory.join("original.txt");
-    let original_temporary: PathBuf = directory.join("original.txt.tmp");
-    write_file(&original_temporary, text)?;
-    // The hard link only succeeds while original.txt does not exist yet.
-    let linked = fs::hard_link(&original_temporary, &original);
-    fs::remove_file(&original_temporary)
-        .with_context(|| format!("could not remove {}", original_temporary.display()))?;
-    match linked {
-        Ok(()) => eprintln!("saved the original settings to {}", original.display()),
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-            add_buttons_to_original(&original, backup)?;
+    let backups: SafetyBackups = SafetyBackups::from_env()?;
+    let original: PathBuf = backups.original_path();
+    match backups.save(backup)? {
+        OriginalBackup::Created => {
+            eprintln!("saved the original settings to {}", original.display());
         }
-        Err(error) => {
-            return Err(error).with_context(|| format!("could not write {}", original.display()));
+        OriginalBackup::Completed => {
+            eprintln!(
+                "added the current button assignments to {}",
+                original.display()
+            );
         }
-    }
-
-    let previous: PathBuf = directory.join("previous.txt");
-    let previous_temporary: PathBuf = directory.join("previous.txt.tmp");
-    write_file(&previous_temporary, text)?;
-    fs::rename(&previous_temporary, &previous)
-        .with_context(|| format!("could not write {}", previous.display()))
-}
-
-/// Adds the current button assignments to an `original.txt` written by
-/// konectl 0.2 or older, once: the file is then rewritten in the current
-/// format and never completed again. A file konectl cannot read is left alone.
-fn add_buttons_to_original(path: &Path, current: &Backup) -> Result<()> {
-    let Ok(text) = fs::read_to_string(path) else {
-        return Ok(());
-    };
-    if Backup::format_version(&text).is_none_or(|version| version >= 3) {
-        return Ok(());
-    }
-    let Ok(original) = Backup::from_text(&text) else {
-        return Ok(());
-    };
-    let completed: Backup = with_original_buttons(&original, current);
-    let temporary: PathBuf = path.with_extension("txt.tmp");
-    write_file(&temporary, &completed.to_text())?;
-    fs::rename(&temporary, path).with_context(|| format!("could not write {}", path.display()))?;
-    if completed == original {
-        eprintln!("updated {} to the current backup format", path.display());
-    } else {
-        eprintln!("added the current button assignments to {}", path.display());
+        OriginalBackup::Updated => {
+            eprintln!(
+                "updated {} to the current backup format",
+                original.display()
+            );
+        }
+        OriginalBackup::Kept => {}
     }
     Ok(())
-}
-
-/// `original` with the button assignments of `current` added where it has
-/// none. konectl 0.2 and older could not change the buttons, so the current
-/// ones are the original ones.
-fn with_original_buttons(original: &Backup, current: &Backup) -> Backup {
-    let mut completed: Backup = original.clone();
-    for profile in &mut completed.profiles {
-        if profile.buttons.is_some() {
-            continue;
-        }
-        let number: u8 = profile.settings.profile();
-        if let Some(buttons) = current
-            .profiles
-            .iter()
-            .find(|candidate| candidate.settings.profile() == number)
-            .and_then(|candidate| candidate.buttons)
-        {
-            profile.buttons = Some(buttons);
-        }
-    }
-    completed
-}
-
-/// Path of a safety backup file, e.g. `previous.txt`.
-fn safety_backup_path(name: &str) -> Result<PathBuf> {
-    Ok(state_directory(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))?.join(name))
-}
-
-/// `$XDG_STATE_HOME/konectl`, or `$HOME/.local/state/konectl`.
-fn state_directory(xdg_state_home: Option<OsString>, home: Option<OsString>) -> Result<PathBuf> {
-    let base: PathBuf = match xdg_state_home.map(PathBuf::from) {
-        Some(path) if path.is_absolute() => path,
-        _ => PathBuf::from(home.context("HOME is not set")?).join(".local/state"),
-    };
-    Ok(base.join("konectl"))
-}
-
-fn write_file(path: &Path, text: &str) -> Result<()> {
-    fs::write(path, text).with_context(|| format!("could not write {}", path.display()))
 }
 
 fn print_settings(settings: &ProfileSettings, active_profile: u8) {
@@ -1506,24 +1386,6 @@ mod tests {
     }
 
     #[test]
-    fn state_directory_prefers_xdg_state_home() {
-        let home = Some(OsString::from("/home/user"));
-        assert_eq!(
-            state_directory(Some(OsString::from("/state")), home.clone()).expect("directory"),
-            PathBuf::from("/state/konectl")
-        );
-        assert_eq!(
-            state_directory(Some(OsString::from("relative")), home.clone()).expect("directory"),
-            PathBuf::from("/home/user/.local/state/konectl")
-        );
-        assert_eq!(
-            state_directory(None, home).expect("directory"),
-            PathBuf::from("/home/user/.local/state/konectl")
-        );
-        assert!(state_directory(None, None).is_err());
-    }
-
-    #[test]
     fn parses_switches_and_debounce() {
         let parsed = Cli::try_parse_from(["konectl", "angle-snapping", "on", "-p", "2"]);
         assert!(parsed.is_ok());
@@ -1578,63 +1440,6 @@ mod tests {
         assert!(parse(&["konectl", "button", "7", "teleport"]).is_err());
         assert!(parse(&["konectl", "button", "7", "swarm:lock"]).is_err());
         assert!(parse(&["konectl", "button", "7"]).is_err());
-    }
-
-    #[test]
-    fn original_backups_get_the_buttons_once() {
-        let current = Backup::from_text(
-            "konectl-backup 3
-firmware 4.32
-dongle-firmware unknown
-active-profile 1
-profile 1 entry 01 64 00 00 00
-profile 1 sensor 01 00 00 01 00 00 12 00 00 00 00 00 00 00 08 00 06 0f 00 02
-profile 1 lighting 06 64 64 46 04 00 ff 00 00 ff 64
-profile 1 button-functions 40 40 40 40 45 46 40 40 40 40 40 00 00 00 40 40 00 00 00 00 00 00 00 00 00 00 00 00
-profile 1 buttons 00 01 00 00 02 00 00 03 00 01 00 34 00 00 00 00 00 00 00 07 00 00 08 00
-profile 1 easy-shift-buttons 01 00 24 01 00 25 02 e2 00 00 00 00 00 00 00 00 00 00 02 e9 00 02 ea 00
-",
-        )
-        .expect("current backup");
-        // An original.txt of konectl 0.2, made with other settings.
-        let original = Backup::from_text(
-            "konectl-backup 2
-firmware 4.32
-dongle-firmware 4.19
-active-profile 1
-profile 1 entry 01 64 00 00 00
-profile 1 sensor 01 00 00 01 00 00 0c 00 00 00 00 00 00 00 07 00 06 0f 00 02
-profile 1 lighting 01 64 64 46 04 00 ff 00 00 ff 64
-",
-        )
-        .expect("original backup");
-        let completed = with_original_buttons(&original, &current);
-        assert_eq!(completed.profiles[0].buttons, current.profiles[0].buttons);
-        assert_eq!(
-            completed.profiles[0].settings,
-            original.profiles[0].settings
-        );
-        assert_eq!(completed.dongle_firmware, original.dongle_firmware);
-
-        // On disk: completed once, then left alone.
-        let directory: PathBuf =
-            std::env::temp_dir().join(format!("konectl-test-original-{}", std::process::id()));
-        fs::create_dir_all(&directory).expect("temporary directory");
-        let path: PathBuf = directory.join("original.txt");
-        // As konectl 0.2 wrote it (to_text writes the current version).
-        let version_2: String = original
-            .to_text()
-            .replace("konectl-backup 3", "konectl-backup 2");
-        fs::write(&path, version_2).expect("write original");
-        add_buttons_to_original(&path, &current).expect("first completion");
-        let first: String = fs::read_to_string(&path).expect("read");
-        assert_eq!(Backup::format_version(&first), Some(3));
-        assert!(first.contains("profile 1 buttons"));
-        let mut changed = current.clone();
-        changed.profiles[0].buttons = None;
-        add_buttons_to_original(&path, &changed).expect("second call");
-        assert_eq!(fs::read_to_string(&path).expect("read"), first);
-        fs::remove_dir_all(&directory).expect("clean up");
     }
 
     #[test]

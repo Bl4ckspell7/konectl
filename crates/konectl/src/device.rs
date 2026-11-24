@@ -13,8 +13,8 @@ use crate::error::{Error, Result};
 use crate::macros::Macro;
 use crate::protocol::{self, Battery, Report, Signal, Status};
 use crate::settings::{
-    Effect, Firmware, Info, Lighting, PROFILE_COUNT, ProfileEntry, ProfileSettings, Sensor,
-    check_debounce_ms, profile_in_use, profile_index, set_profile_color,
+    Effect, Firmware, Info, LiftOff, Lighting, PROFILE_COUNT, ProfileEntry, ProfileSettings,
+    Sensor, check_debounce_ms, profile_in_use, profile_index, set_profile_color,
 };
 use crate::transport::{HidTransport, Transport};
 
@@ -194,6 +194,10 @@ impl Manager {
     }
 }
 
+/// How long the mouse has to be moved during the lift-off calibration (the
+/// official software asks for 10 seconds).
+pub const LIFT_OFF_CALIBRATION_SECONDS: u64 = 12;
+
 /// What [`KoneProAir::remove_profile`] changed besides removing the profile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemovedProfile {
@@ -325,7 +329,7 @@ impl<T: Transport> KoneProAir<T> {
     }
 
     /// Starts the lift-off calibration. Move the mouse continuously on the
-    /// surface for about 10 seconds, then call
+    /// surface for [`LIFT_OFF_CALIBRATION_SECONDS`], then call
     /// [`Self::finish_lift_off_calibration`] and set [`LiftOff::Custom`] to
     /// use the measured distance.
     ///
@@ -346,7 +350,9 @@ impl<T: Transport> KoneProAir<T> {
         Ok(())
     }
 
-    /// Ends the lift-off calibration and keeps the measured distance.
+    /// Ends the lift-off calibration and keeps the measured distance; call it
+    /// [`LIFT_OFF_CALIBRATION_SECONDS`] after
+    /// [`Self::start_lift_off_calibration`] while the mouse is being moved.
     ///
     /// Not repeated when unanswered: whether applying twice is harmless is
     /// not known.
@@ -666,6 +672,50 @@ impl<T: Transport> KoneProAir<T> {
     pub fn write_sensor(&mut self, sensor: &Sensor) -> Result<()> {
         let entry: ProfileEntry = self.profile_entry(sensor.profile())?;
         self.write_blocks(&entry, sensor, None, None, &[])
+    }
+
+    /// Writes what changed from `before` to `after` (the same profile, as
+    /// read with [`Self::settings`]) and returns whether anything was written.
+    ///
+    /// Only block 0 is written when the lighting did not change: with the AIMO
+    /// effect the mouse reports the colours it shows, so writing the lighting
+    /// back would save those.
+    pub fn write_changes(
+        &mut self,
+        before: &ProfileSettings,
+        after: &ProfileSettings,
+    ) -> Result<bool> {
+        if before.profile() != after.profile() {
+            return Err(Error::InvalidValue(format!(
+                "the settings of profile {} cannot replace those of profile {}",
+                after.profile(),
+                before.profile()
+            )));
+        }
+        if before == after {
+            return Ok(false);
+        }
+        if before.lighting == after.lighting {
+            self.write_sensor(&after.sensor)?;
+        } else {
+            self.write_settings(after)?;
+        }
+        Ok(true)
+    }
+
+    /// Sets the lift-off distance in every profile in use, as the official
+    /// software does after a calibration. Returns the profiles that changed.
+    pub fn set_lift_off_all(&mut self, lift_off: LiftOff) -> Result<Vec<u8>> {
+        let mut changed: Vec<u8> = Vec::new();
+        for profile in self.profiles()? {
+            let mut sensor: Sensor = self.settings(Some(profile))?.sensor;
+            if sensor.lift_off() != lift_off {
+                sensor.set_lift_off(lift_off)?;
+                self.write_sensor(&sensor)?;
+                changed.push(profile);
+            }
+        }
+        Ok(changed)
     }
 
     /// Sets the debounce time (0–10 ms) in every profile in use, as the
