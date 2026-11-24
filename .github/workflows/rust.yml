@@ -34,7 +34,8 @@ jobs:
       - name: Install dependencies
         run: |
           pacman-key --init
-          pacman -Syu --noconfirm git pkgconf rust shellcheck systemd-libs
+          # fontconfig, freetype2: the GUI (Slint) links them.
+          pacman -Syu --noconfirm fontconfig freetype2 git pkgconf rust shellcheck systemd-libs
           # Keep only the installed package versions, so the cache does not grow.
           pacman -Sc --noconfirm
 
@@ -63,7 +64,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Run tests
         run: cargo test --workspace --locked
@@ -82,19 +83,31 @@ jobs:
           pacman-key --init
           # gcc: hidapi compiles C code and rustup's toolchains link with it (Arch's rust
           # package pulls it in itself).
-          pacman -Syu --noconfirm gcc git pkgconf rustup systemd-libs
+          pacman -Syu --noconfirm fontconfig freetype2 gcc git pkgconf rustup systemd-libs
 
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Install the minimum Rust version
+      # The library and the CLI share the workspace's version; the GUI needs a
+      # newer one (Slint).
+      - name: Install the minimum Rust versions
+        id: msrv
         run: |
           set -euo pipefail
-          msrv="$(sed -nE 's/^rust-version = "([^"]+)"/\1/p' Cargo.toml)"
-          rustup toolchain install "$msrv" --profile minimal
-          rustup default "$msrv"
+          workspace="$(sed -nE 's/^rust-version = "([^"]+)"/\1/p' Cargo.toml)"
+          gui="$(sed -nE 's/^rust-version = "([^"]+)"/\1/p' crates/konectl-gui/Cargo.toml)"
+          rustup toolchain install "$workspace" "$gui" --profile minimal
+          echo "workspace=$workspace" >> "$GITHUB_OUTPUT"
+          echo "gui=$gui" >> "$GITHUB_OUTPUT"
 
-      - name: Check the workspace
-        run: cargo check --workspace --all-targets --locked
+      - name: Check the library and the CLI
+        env:
+          TOOLCHAIN: ${{ steps.msrv.outputs.workspace }}
+        run: cargo "+$TOOLCHAIN" check -p konectl -p konectl-cli --all-targets --locked
+
+      - name: Check the GUI
+        env:
+          TOOLCHAIN: ${{ steps.msrv.outputs.gui }}
+        run: cargo "+$TOOLCHAIN" check -p konectl-gui --all-targets --all-features --locked
