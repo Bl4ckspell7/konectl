@@ -1,0 +1,115 @@
+// Navigation between the pages, and the state of the mouse below it.
+import { Palette, ProgressIndicator } from "std-widgets.slint";
+import { Theme } from "../../globals/theme.slint";
+
+component NavItem inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    min-height: 36px;
+    max-height: 36px;
+    border-radius: Theme.radius;
+    background: root.selected ? Palette.selection-background
+        : touch.has-hover && root.enabled ? Palette.control-background : transparent;
+    accessible-role: tab;
+    accessible-label: root.text;
+    accessible-item-selected: root.selected;
+    accessible-action-default => {
+        if root.enabled {
+            root.clicked();
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+
+        Text {
+            text: root.text;
+            vertical-alignment: center;
+            color: root.selected ? Palette.selection-foreground
+                : root.enabled ? Palette.foreground : Theme.muted;
+            font-weight: root.selected ? 600 : 400;
+        }
+    }
+}
+
+export component Sidebar inherits Rectangle {
+    in property <[string]> pages;
+    in-out property <int> current;
+    in property <bool> enabled;
+    // The state of the mouse: a headline, the battery and details.
+    in property <string> headline;
+    in property <string> battery;
+    in property <float> battery-level: -1;
+    in property <string> detail;
+
+    background: Theme.sidebar;
+    min-width: Theme.sidebar-width;
+    max-width: Theme.sidebar-width;
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 4px;
+
+        Text {
+            text: "konectl";
+            font-size: 18px;
+            font-weight: 700;
+            vertical-stretch: 0;
+        }
+
+        Rectangle {
+            min-height: 12px;
+            max-height: 12px;
+        }
+
+        for page[index] in root.pages: NavItem {
+            text: page;
+            selected: root.enabled && index == root.current;
+            enabled: root.enabled;
+            clicked => {
+                root.current = index;
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+        }
+
+        Text {
+            text: root.headline;
+            font-weight: 600;
+            wrap: word-wrap;
+            vertical-stretch: 0;
+        }
+
+        if root.battery != "": Text {
+            text: root.battery;
+            vertical-stretch: 0;
+        }
+
+        if root.battery-level >= 0: ProgressIndicator {
+            progress: root.battery-level;
+            vertical-stretch: 0;
+        }
+
+        if root.detail != "": Text {
+            text: root.detail;
+            color: Theme.muted;
+            font-size: 12px;
+            wrap: word-wrap;
+            vertical-stretch: 0;
+        }
+    }
+}

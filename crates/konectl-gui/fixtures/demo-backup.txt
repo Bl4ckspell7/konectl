@@ -1,0 +1,22 @@
+konectl-backup 3
+firmware 4.32
+dongle-firmware 4.19
+active-profile 1
+profile 1 entry 01 64 35 84 e4
+profile 1 sensor 01 00 00 01 10 00 18 00 20 00 40 00 00 00 07 00 06 0f 00 02
+profile 1 lighting 06 64 64 46 04 35 84 e4 91 41 ac
+profile 1 button-functions 40 40 40 40 45 46 40 40 40 40 40 00 00 00 40 40 00 00 00 00 00 00 00 00 00 00 00 00
+profile 1 buttons 00 01 00 00 02 00 00 03 00 01 00 34 00 00 00 00 00 00 00 07 00 00 08 00
+profile 1 easy-shift-buttons 01 00 24 01 00 25 02 e2 00 00 00 00 00 00 00 00 00 00 02 e9 00 02 ea 00
+profile 2 entry 01 64 e0 1b 24
+profile 2 sensor 02 00 00 00 08 00 10 00 20 00 00 00 00 00 06 00 06 0f 00 02
+profile 2 lighting 01 64 64 64 04 e0 1b 24 e0 1b 24
+profile 2 button-functions 40 40 40 40 45 46 40 40 40 40 40 00 00 00 40 40 00 00 00 00 00 00 00 00 00 00 00 00
+profile 2 buttons 00 01 00 00 02 00 00 03 00 01 00 34 00 00 00 00 00 00 00 07 00 00 08 00
+profile 2 easy-shift-buttons 01 00 24 01 00 25 02 e2 00 00 00 00 00 00 00 00 00 00 02 e9 00 02 ea 00
+profile 3 entry 01 64 2e c2 7e
+profile 3 sensor 03 01 00 00 14 00 28 00 00 00 00 00 00 00 07 00 06 0f 00 02
+profile 3 lighting 02 64 64 32 06 2e c2 7e 2e c2 7e
+profile 3 button-functions 40 40 40 40 45 46 40 40 40 40 40 00 00 00 40 40 00 00 00 00 00 00 00 00 00 00 00 00
+profile 3 buttons 00 01 00 00 02 00 00 03 00 01 00 34 00 00 00 00 00 00 00 07 00 00 08 00
+profile 3 easy-shift-buttons 01 00 24 01 00 25 02 e2 00 00 00 00 00 00 00 00 00 00 02 e9 00 02 ea 00

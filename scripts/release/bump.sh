@@ -5,7 +5,7 @@
 #       Print the next version (no leading "v"). Read-only.
 #
 #   bump.sh apply <version>
-#       Set the version of both crates (Cargo.toml, Cargo.lock),
+#       Set the version of all workspace crates (Cargo.toml, Cargo.lock),
 #       (re)generate CHANGELOG.md and write this release's notes to
 #       $RELEASE_NOTES (default /tmp/release-notes.md). Mutates the tree.
 #
@@ -20,7 +20,7 @@ CARGO_TOML="Cargo.toml"
 CARGO_LOCK="Cargo.lock"
 RELEASE_NOTES="${RELEASE_NOTES:-/tmp/release-notes.md}"
 # Workspace packages; all share the version from [workspace.package].
-CRATES=("konectl" "konectl-cli")
+CRATES=("konectl" "konectl-cli" "konectl-gui")
 
 die() {
     echo "error: $*" >&2

@@ -1,0 +1,51 @@
+// State shared by all pages, set from Rust (`src/ui/app.rs`).
+
+// What the app knows about the mouse.
+export enum MouseState {
+    // No mouse found (or opening it failed: see `problem`).
+    searching,
+    // A mouse is connected, but this user may not open it.
+    no-access,
+    // The dongle is connected, the mouse does not answer.
+    asleep,
+    connected,
+}
+
+// The mouse as shown on the Device page and in the sidebar.
+export struct DeviceView {
+    connection: string,
+    firmware: string,
+    battery: string,
+    // 0–1, or below 0 when unknown.
+    battery-level: float,
+    signal: string,
+    profiles: string,
+    energy-saving: string,
+}
+
+export global AppState {
+    in property <MouseState> state: MouseState.searching;
+    // The pages have data: connected, or asleep after being connected.
+    in property <bool> has-snapshot;
+    in property <DeviceView> device;
+    // Why no mouse could be used, if it is not simply unplugged.
+    in property <string> problem;
+    in property <bool> busy;
+    in property <string> busy-text;
+    in-out property <string> error;
+    in property <bool> changed-elsewhere;
+    in property <bool> in-flatpak;
+    // The commands that install the udev rule in a terminal.
+    in property <string> manual-commands;
+    in property <bool> demo;
+
+    in-out property <int> page;
+
+    callback reload();
+    callback retry();
+    callback allow-access();
+
+    public function dismiss-error() {
+        self.error = "";
+    }
+}

@@ -2,22 +2,39 @@
 
 ## Prerequisites
 
-- Rust 1.88 or newer (edition 2024)
+- Rust 1.88 or newer (edition 2024); the GUI (`crates/konectl-gui`, Slint) needs 1.95
 - a C compiler, `pkg-config` and the libudev development files (see [Install](README.md#install))
+- for the GUI: the fontconfig and freetype development files (Arch: `fontconfig freetype2`,
+  Debian/Ubuntu: `libfontconfig-dev libfreetype-dev`)
 - For protocol work: [docs/reverse-engineering.md](docs/reverse-engineering.md)
 
 ## Checks
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --locked
 shellcheck tools/re/*.sh scripts/release/*.sh
 ```
 
 The **Rust** workflow (`.github/workflows/rust.yml`) runs the same checks on every push
-and pull request to `main`, plus `cargo check` with the minimum supported Rust version
-(`rust-version` in `Cargo.toml`).
+and pull request to `main`, plus `cargo check` with the minimum supported Rust versions
+(`rust-version` in `Cargo.toml`, and in `crates/konectl-gui/Cargo.toml` for the GUI).
+
+## GUI
+
+`konectl-gui` runs all mouse access on a worker thread (`src/worker.rs`); the window only
+sends requests and shows events. Without a mouse:
+
+```sh
+KONECTL_GUI_DEMO=1 cargo run -p konectl-gui          # a simulated mouse
+KONECTL_GUI_DEMO=no-access cargo run -p konectl-gui  # also: asleep, unplugged
+SLINT_STYLE=cosmic cargo run -p konectl-gui          # another widget style (default fluent)
+SLINT_BACKEND=winit-software cargo run -p konectl-gui  # without OpenGL
+```
+
+`cargo run -p konectl-gui --features screenshots -- --screenshots DIR` draws the demo
+screens into PPM files without opening a window.
 
 ## Dependencies
 

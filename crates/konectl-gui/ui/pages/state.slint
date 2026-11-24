@@ -1,0 +1,66 @@
+// Shown instead of the pages while no mouse can be used: none found, reading
+// it failed, or it sleeps before it was ever read.
+import { Button, Spinner } from "std-widgets.slint";
+import { AppState, MouseState } from "../globals/app-state.slint";
+import { Theme } from "../globals/theme.slint";
+
+export component StatePage {
+    property <bool> asleep: AppState.state == MouseState.asleep;
+    property <bool> failed: AppState.problem != "";
+
+    VerticalLayout {
+        alignment: center;
+        padding: 32px;
+
+        HorizontalLayout {
+            alignment: center;
+
+            VerticalLayout {
+                max-width: 560px;
+                spacing: 12px;
+
+                if !root.failed && !root.asleep: HorizontalLayout {
+                    alignment: center;
+
+                    Spinner {
+                        indeterminate: true;
+                        min-width: 32px;
+                        max-width: 32px;
+                        min-height: 32px;
+                        max-height: 32px;
+                    }
+                }
+
+                Text {
+                    text: root.asleep ? "The mouse does not answer"
+                        : root.failed ? "The mouse could not be read" : "Looking for the mouse";
+                    font-size: 20px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: root.asleep
+                        ? "Move it, or switch it on. konectl connects as soon as it answers."
+                        : root.failed ? AppState.problem
+                        : "Connect the wireless dongle or the USB cable of your ROCCAT Kone Pro Air.";
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                    color: Theme.muted;
+                }
+
+                if root.asleep || root.failed: HorizontalLayout {
+                    alignment: center;
+
+                    Button {
+                        text: "Try again";
+                        enabled: !AppState.busy;
+                        clicked => {
+                            AppState.retry();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

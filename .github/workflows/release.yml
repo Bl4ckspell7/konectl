@@ -50,7 +50,8 @@ jobs:
       - name: Install dependencies
         run: |
           pacman-key --init
-          pacman -Syu --noconfirm git pkgconf rust systemd-libs uv
+          # fontconfig, freetype2: the tests build the GUI (Slint), which links them.
+          pacman -Syu --noconfirm fontconfig freetype2 git pkgconf rust systemd-libs uv
 
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

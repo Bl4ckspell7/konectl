@@ -1,0 +1,45 @@
+// The Device page: what the mouse is and how it is connected.
+import { AppState } from "../globals/app-state.slint";
+import { Theme } from "../globals/theme.slint";
+import { Group, InfoRow } from "../components/widgets/group.slint";
+
+export component DevicePage {
+    VerticalLayout {
+        alignment: start;
+        spacing: Theme.spacing;
+
+        Group {
+            title: "Device";
+
+            InfoRow {
+                label: "Connection";
+                value: AppState.device.connection;
+            }
+
+            InfoRow {
+                label: "Firmware";
+                value: AppState.device.firmware;
+            }
+
+            InfoRow {
+                label: "Battery";
+                value: AppState.device.battery;
+            }
+
+            InfoRow {
+                label: "Signal";
+                value: AppState.device.signal;
+            }
+
+            InfoRow {
+                label: "Profiles";
+                value: AppState.device.profiles;
+            }
+
+            InfoRow {
+                label: "Energy saving";
+                value: AppState.device.energy-saving;
+            }
+        }
+    }
+}
