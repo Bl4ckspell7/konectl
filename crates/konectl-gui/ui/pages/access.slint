@@ -1,0 +1,92 @@
+// Shown when a mouse is connected but this user may not open it.
+import { Button, TextEdit } from "std-widgets.slint";
+import { AppState } from "../globals/app-state.slint";
+import { Theme } from "../globals/theme.slint";
+
+export component AccessPage {
+    VerticalLayout {
+        alignment: center;
+        padding: 32px;
+
+        HorizontalLayout {
+            alignment: center;
+
+            VerticalLayout {
+                max-width: 640px;
+                spacing: 12px;
+
+                Text {
+                    text: "konectl needs access to the mouse";
+                    font-size: 20px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: "Linux lets only the administrator change mouse settings. A udev rule "
+                        + "gives access to whoever is logged in at this computer. It is installed "
+                        + "once, with your password.";
+                    wrap: word-wrap;
+                    horizontal-alignment: center;
+                    color: Theme.muted;
+                }
+
+                if !AppState.in-flatpak: HorizontalLayout {
+                    alignment: center;
+
+                    Button {
+                        text: "Allow access";
+                        primary: true;
+                        enabled: !AppState.busy;
+                        clicked => {
+                            AppState.allow-access();
+                        }
+                    }
+                }
+
+                Rectangle {
+                    min-height: 8px;
+                    max-height: 8px;
+                }
+
+                Text {
+                    text: AppState.in-flatpak
+                        ? "Run these commands in a terminal on your computer, then try again:"
+                        : "Or run these commands in a terminal:";
+                    wrap: word-wrap;
+                }
+
+                commands := TextEdit {
+                    text: AppState.manual-commands;
+                    read-only: true;
+                    wrap: no-wrap;
+                    font-size: 12px;
+                    min-height: 176px;
+                    max-height: 176px;
+                }
+
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: Theme.spacing;
+
+                    Button {
+                        text: "Copy commands";
+                        clicked => {
+                            commands.select-all();
+                            commands.copy();
+                            commands.clear-selection();
+                        }
+                    }
+
+                    Button {
+                        text: "Try again";
+                        enabled: !AppState.busy;
+                        clicked => {
+                            AppState.retry();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

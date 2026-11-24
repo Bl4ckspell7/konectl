@@ -1,0 +1,50 @@
+// The line at the bottom: what the app is doing, and a note on the right.
+import { Palette, Spinner } from "std-widgets.slint";
+import { Theme } from "../../globals/theme.slint";
+
+export component StatusBar inherits Rectangle {
+    in property <string> text;
+    in property <bool> busy;
+    in property <string> note;
+
+    min-height: 32px;
+    max-height: 32px;
+    background: Theme.sidebar;
+
+    Rectangle {
+        y: 0;
+        height: 1px;
+        background: Palette.border;
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: Theme.spacing;
+
+        if root.busy: VerticalLayout {
+            alignment: center;
+
+            Spinner {
+                indeterminate: true;
+                min-width: 16px;
+                max-width: 16px;
+                min-height: 16px;
+                max-height: 16px;
+            }
+        }
+
+        Text {
+            text: root.text;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+
+        Text {
+            text: root.note;
+            vertical-alignment: center;
+            color: Theme.muted;
+        }
+    }
+}

@@ -1,0 +1,21 @@
+// Sizes and the few colours the std-widgets palette has no name for. Colours
+// follow the light or dark scheme of the desktop.
+import { Palette } from "std-widgets.slint";
+
+export global Theme {
+    out property <bool> dark: Palette.color-scheme == ColorScheme.dark;
+
+    out property <length> spacing: 8px;
+    out property <length> padding: 16px;
+    out property <length> radius: 8px;
+    out property <length> sidebar-width: 208px;
+    out property <length> label-width: 150px;
+
+    out property <brush> sidebar: Palette.alternate-background;
+    out property <brush> card: Palette.background;
+    out property <brush> muted: Palette.foreground.transparentize(35%);
+
+    out property <brush> info-background: dark ? #1c3a5e : #dbeafe;
+    out property <brush> warning-background: dark ? #4a3b12 : #fdf0d5;
+    out property <brush> error-background: dark ? #4b1c1c : #fbe0e0;
+}

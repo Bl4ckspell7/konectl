@@ -1,0 +1,49 @@
+// A titled box of settings, as high as its content.
+import { Palette } from "std-widgets.slint";
+import { Theme } from "../../globals/theme.slint";
+
+export component Group inherits Rectangle {
+    in property <string> title;
+
+    background: Theme.card;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Palette.border;
+    // A rectangle in a layout takes all the height it is given; hug the content.
+    max-height: content.preferred-height;
+
+    content := VerticalLayout {
+        padding: Theme.padding;
+        spacing: Theme.spacing;
+
+        Text {
+            text: root.title;
+            font-weight: 600;
+            accessible-role: none;
+        }
+
+        @children
+    }
+}
+
+// A label and a value in a group.
+export component InfoRow {
+    in property <string> label;
+    in property <string> value;
+
+    HorizontalLayout {
+        spacing: 12px;
+
+        Text {
+            text: root.label;
+            width: Theme.label-width;
+            color: Theme.muted;
+        }
+
+        Text {
+            text: root.value;
+            horizontal-stretch: 1;
+            wrap: word-wrap;
+        }
+    }
+}

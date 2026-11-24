@@ -1,0 +1,48 @@
+// A message above the page, with an optional action.
+import { Button, Palette } from "std-widgets.slint";
+import { Theme } from "../../globals/theme.slint";
+
+export enum BannerKind { info, warning, error }
+
+export component Banner inherits Rectangle {
+    in property <string> text;
+    in property <BannerKind> kind: BannerKind.info;
+    in property <string> action-text;
+    in property <bool> action-enabled: true;
+    in property <bool> closable;
+    callback action();
+    callback close();
+
+    border-radius: Theme.radius;
+    background: root.kind == BannerKind.error ? Theme.error-background
+        : root.kind == BannerKind.warning ? Theme.warning-background : Theme.info-background;
+
+    HorizontalLayout {
+        padding: 10px;
+        padding-left: 14px;
+        spacing: Theme.spacing;
+
+        Text {
+            text: root.text;
+            wrap: word-wrap;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            color: Palette.foreground;
+        }
+
+        if root.action-text != "": Button {
+            text: root.action-text;
+            enabled: root.action-enabled;
+            clicked => {
+                root.action();
+            }
+        }
+
+        if root.closable: Button {
+            text: "Dismiss";
+            clicked => {
+                root.close();
+            }
+        }
+    }
+}

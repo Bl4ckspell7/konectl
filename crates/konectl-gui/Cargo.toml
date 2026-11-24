@@ -1,0 +1,45 @@
+[package]
+name = "konectl-gui"
+description = "Desktop app to configure the ROCCAT Kone Pro Air mouse on Linux (unofficial)"
+version.workspace = true
+edition.workspace = true
+# Slint needs a newer Rust than the library and the CLI.
+rust-version = "1.95"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories = ["hardware-support", "gui"]
+readme = "../../README.md"
+# Not on crates.io until the app is complete.
+publish = false
+
+[dependencies]
+konectl.workspace = true
+# winit (X11 and Wayland) with the OpenGL renderer, and the software renderer
+# (with vector paths) for machines without a usable GPU driver. No Qt backend:
+# it would need the Qt development files to build.
+slint = { version = "1.19.1", default-features = false, features = [
+    "std",
+    "backend-winit",
+    "renderer-femtovg",
+    "renderer-software",
+    "software-renderer-path",
+    "accessibility",
+    "compat-1-2",
+] }
+
+[features]
+# `konectl-gui --screenshots DIR` draws the demo screens into image files, without
+# a window (for the README and for reviewing layouts).
+screenshots = []
+
+[build-dependencies]
+slint-build = "1.19.1"
+
+# The workspace lints, but unsafe code is denied instead of forbidden: the code
+# Slint generates uses it, and only that module allows it (see `main.rs`).
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
