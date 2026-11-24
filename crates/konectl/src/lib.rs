@@ -28,6 +28,7 @@ mod color;
 mod device;
 mod error;
 pub mod macros;
+pub mod pairing;
 pub mod protocol;
 pub mod safety;
 pub mod settings;
