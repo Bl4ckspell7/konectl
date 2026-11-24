@@ -33,6 +33,8 @@ pub mod protocol;
 pub mod safety;
 pub mod settings;
 mod transport;
+#[cfg(target_os = "linux")]
+pub mod udev;
 
 pub use backup::{Backup, ProfileBackup};
 pub use buttons::{ButtonAction, Buttons, Layer, MacroMode, SystemControl};
