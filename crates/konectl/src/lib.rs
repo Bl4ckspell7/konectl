@@ -36,7 +36,9 @@ mod transport;
 pub use backup::{Backup, ProfileBackup};
 pub use buttons::{ButtonAction, Buttons, Layer, MacroMode, SystemControl};
 pub use color::{ParseRgbError, Rgb};
-pub use device::{ConnectionMode, DeviceInfo, KoneProAir, Manager, RemovedProfile};
+pub use device::{
+    ConnectionMode, DeviceInfo, KoneProAir, LIFT_OFF_CALIBRATION_SECONDS, Manager, RemovedProfile,
+};
 pub use error::{Error, Result};
 pub use macros::{Macro, MacroEvent};
 pub use protocol::{Battery, Report, Signal};
