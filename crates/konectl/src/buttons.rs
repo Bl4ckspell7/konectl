@@ -98,7 +98,7 @@ impl Buttons {
     }
 
     /// The same assignments for profile `profile`, e.g. to copy a profile.
-    pub(crate) const fn with_profile(&self, profile: u8) -> Self {
+    pub const fn with_profile(&self, profile: u8) -> Self {
         Self { profile, ..*self }
     }
 

@@ -337,7 +337,7 @@ impl Sensor {
     }
 
     /// The same block for profile `profile`, e.g. to copy a profile.
-    pub(crate) const fn with_profile(&self, profile: u8) -> Self {
+    pub const fn with_profile(&self, profile: u8) -> Self {
         let mut bytes: [u8; SENSOR_LEN] = self.bytes;
         bytes[Self::PROFILE] = profile;
         Self { bytes }
