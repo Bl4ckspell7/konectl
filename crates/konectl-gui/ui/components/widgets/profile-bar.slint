@@ -1,5 +1,5 @@
-// The profiles in use: which one the page shows, which one is active, and
-// adding, removing, activating and colouring them.
+// The profiles in use: which one the page shows and which one is active, and
+// one menu to activate, add, colour and remove them.
 import { Button, Palette } from "std-widgets.slint";
 import { AppState, MouseState, ProfileView } from "../../globals/app-state.slint";
 import { Theme } from "../../globals/theme.slint";
@@ -65,9 +65,67 @@ component ProfileChip inherits Rectangle {
     }
 }
 
+// An entry of the profile menu.
+component MenuEntry inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    min-height: 32px;
+    max-height: 32px;
+    border-radius: 6px;
+    background: touch.has-hover && root.enabled ? Palette.control-background : transparent;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if root.enabled {
+            root.clicked();
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+
+        Text {
+            text: root.text;
+            vertical-alignment: center;
+            color: root.enabled ? Palette.foreground : Theme.muted;
+        }
+    }
+}
+
 export component ProfileBar {
     in property <ProfileView> selected;
     property <bool> idle: !AppState.busy && AppState.state == MouseState.connected;
+
+    // Only its picker is used, opened from the menu.
+    colour := ColorButton {
+        x: root.width - self.width;
+        y: (root.height - self.height) / 2;
+        swatch-hidden: true;
+        label: "Profile colour";
+        popup-x: self.width - 256px;
+        color: root.selected.color;
+        has-color: root.selected.has-color;
+        allow-none: true;
+        enabled: root.idle;
+        picked(chosen) => {
+            AppState.set-profile-color(AppState.profile, chosen);
+        }
+        cleared => {
+            AppState.clear-profile-color(AppState.profile);
+        }
+    }
 
     HorizontalLayout {
         spacing: Theme.spacing;
@@ -92,51 +150,63 @@ export component ProfileBar {
             horizontal-stretch: 1;
         }
 
-        Text {
-            text: "Colour";
-            color: Theme.muted;
-            vertical-alignment: center;
+        menu-button := Button {
+            text: "Profile ▾";
+            enabled: root.idle;
+            clicked => {
+                menu.show();
+            }
         }
+    }
 
-        VerticalLayout {
-            alignment: center;
+    menu := PopupWindow {
+        x: root.width - 240px;
+        y: root.height + 4px;
+        width: 240px;
+        close-policy: close-on-click;
 
-            ColorButton {
-                label: "Profile colour";
-                color: root.selected.color;
-                has-color: root.selected.has-color;
-                allow-none: true;
-                enabled: root.idle;
-                picked(chosen) => {
-                    AppState.set-profile-color(AppState.profile, chosen);
+        Rectangle {
+            background: Palette.background;
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: Palette.border;
+            drop-shadow-blur: 10px;
+            drop-shadow-color: Theme.shadow;
+
+            VerticalLayout {
+                padding: 4px;
+
+                MenuEntry {
+                    text: root.selected.active ? "Profile " + AppState.profile + " is active" : "Activate profile " + AppState.profile;
+                    enabled: root.idle && !root.selected.active;
+                    clicked => {
+                        AppState.activate-profile(AppState.profile);
+                    }
                 }
-                cleared => {
-                    AppState.clear-profile-color(AppState.profile);
+
+                MenuEntry {
+                    text: "Add a copy of profile " + AppState.profile;
+                    enabled: root.idle && AppState.profiles.length < 5;
+                    clicked => {
+                        AppState.add-profile(AppState.profile);
+                    }
                 }
-            }
-        }
 
-        Button {
-            text: "Activate";
-            enabled: root.idle && !root.selected.active;
-            clicked => {
-                AppState.activate-profile(AppState.profile);
-            }
-        }
+                MenuEntry {
+                    text: "Colour …";
+                    enabled: root.idle;
+                    clicked => {
+                        colour.open();
+                    }
+                }
 
-        Button {
-            text: "Add";
-            enabled: root.idle && AppState.profiles.length < 5;
-            clicked => {
-                AppState.add-profile(AppState.profile);
-            }
-        }
-
-        Button {
-            text: "Remove";
-            enabled: root.idle && !root.selected.active && AppState.profiles.length > 1;
-            clicked => {
-                confirm.show();
+                MenuEntry {
+                    text: "Remove profile " + AppState.profile + " …";
+                    enabled: root.idle && !root.selected.active && AppState.profiles.length > 1;
+                    clicked => {
+                        confirm.show();
+                    }
+                }
             }
         }
     }
