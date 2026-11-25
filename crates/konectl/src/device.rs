@@ -11,7 +11,7 @@ use crate::buttons::{ButtonAction, Buttons, Layer};
 use crate::color::Rgb;
 use crate::error::{Error, Result};
 use crate::macros::Macro;
-use crate::protocol::{self, Battery, Report, Signal, Status};
+use crate::protocol::{self, Battery, FunctionEvent, Report, Signal, Status};
 use crate::settings::{
     Effect, Firmware, Info, LiftOff, Lighting, PROFILE_COUNT, ProfileEntry, ProfileSettings,
     Sensor, check_debounce_ms, profile_in_use, profile_index, set_profile_color,
@@ -559,6 +559,21 @@ impl<T: Transport> KoneProAir<T> {
     /// reading from it fails. Sends nothing; drops queued reports.
     pub fn is_present(&mut self) -> bool {
         self.discard_pending(0).is_ok()
+    }
+
+    /// The functions the mouse reported by itself since the last call, e.g.
+    /// when its profile button switched profiles. Sends nothing; other queued
+    /// reports are dropped (reports read while waiting for an answer are not
+    /// kept). Fails once the device is gone.
+    pub fn take_function_events(&mut self) -> Result<Vec<FunctionEvent>> {
+        let mut events: Vec<FunctionEvent> = Vec::new();
+        for _ in 0..MAX_STALE_REPORTS {
+            match self.transport.read_report(0)? {
+                Some(report) => events.extend(protocol::parse_function_event(&report)),
+                None => break,
+            }
+        }
+        Ok(events)
     }
 
     /// Makes `profile` (1–5) the active profile.
@@ -1229,6 +1244,38 @@ mod tests {
         fn read_report(&mut self, _timeout_ms: i32) -> Result<Option<Report>> {
             Ok(self.pending.pop_front())
         }
+    }
+
+    #[test]
+    fn takes_the_functions_the_mouse_reported() {
+        // Captured: Easy-Shift held (slot 5), then the profile-previous
+        // function; a stale battery answer in between is dropped.
+        let mut mouse = KoneProAir {
+            transport: MockTransport::new(Vec::new()),
+            mode: ConnectionMode::Wireless,
+        };
+        mouse.transport.pending.extend([
+            report_with_prefix(&[0x90, 0x07, 0x04, 0x00, 0x45, 0x00, 0x00, 0x05]),
+            battery_reply(80),
+            report_with_prefix(&[0x90, 0x07, 0x04, 0x00, 0x47, 0x00, 0x00, 0x06]),
+        ]);
+        let events: Vec<FunctionEvent> = mouse.take_function_events().expect("events");
+        assert_eq!(
+            events,
+            [
+                FunctionEvent {
+                    code: 0x45,
+                    entry: [0, 0],
+                    slot: 5
+                },
+                FunctionEvent {
+                    code: 0x47,
+                    entry: [0, 0],
+                    slot: 6
+                },
+            ]
+        );
+        assert!(mouse.take_function_events().expect("none").is_empty());
     }
 
     fn init_reply() -> Report {

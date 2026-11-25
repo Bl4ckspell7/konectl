@@ -44,7 +44,7 @@ pub use device::{
 };
 pub use error::{Error, Result};
 pub use macros::{Macro, MacroEvent};
-pub use protocol::{Battery, Report, Signal};
+pub use protocol::{Battery, FunctionEvent, Report, Signal};
 pub use settings::{
     Effect, Firmware, Info, LedTimeout, LiftOff, Lighting, PollingRate, ProfileSettings, Sensor,
 };

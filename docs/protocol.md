@@ -73,7 +73,7 @@ error `0d`. Moving the mouse wakes it up.
 | `10 09 01 00 01` to the dongle | start pairing, see [below](#pairing)     |
 | `10 <1f+N> 3c <chunk> …`, `10 60 06 00 92 2c 00 00 00 <N>` | macro `N`: record and commit, see [macros](#macros) |
 | `90 09` to the dongle       | connection state: `cc` = mouse connected and awake, `dd` = asleep (Swarm polls it) |
-| `90 07 …` from the mouse    | button press for a function Swarm carries out, see [buttons](#blocks-24-buttons) |
+| `90 07 …` from the mouse    | a button carried out a function: profile switches, Easy-Shift, or one Swarm carries out; see [buttons](#blocks-24-buttons) |
 | `90 71`, `10 0a`, `10 71`   | *unknown*, see below |
 
 ### Device info: `90 00 04 00 18 25 51 32`
@@ -244,6 +244,13 @@ When a button with a `0b` entry is pressed, the mouse sends
 `90 07 04 00 <code> <entry> <slot>` on the vendor channel (`90 07 04 00 40 0b
 02 04` for "Open Swarm" on slot 4) and Swarm carries out the function. The
 website, file or program to open is stored in Swarm only.
+
+The mouse also sends this report by itself when a button switches profiles,
+with entry `00 00`: seen for `46` (next profile), `47` (previous profile) and
+`49`, `4a` (profile presets 2 and 3), so a program can notice the switch
+without polling. Holding an Easy-Shift button sent `45`, and releasing it `3c`,
+both with the same slot. Seen through the dongle; what the slot numbers count
+is not known yet.
 
 The `05` entries work without Swarm: the mouse sends them as HID Generic
 Desktop System Control on its interface 3 (report ID 1, one bit each for

@@ -45,6 +45,8 @@ const CMD_BUTTON_FUNCTIONS: u8 = 0x02;
 const CMD_ACTIVATE_PROFILE: u8 = 0x03;
 const CMD_BUTTONS: u8 = 0x04;
 const CMD_EASY_SHIFT_BUTTONS: u8 = 0x05;
+const CMD_FUNCTION_EVENT: u8 = 0x07;
+const FUNCTION_EVENT_LEN: u8 = 0x04;
 const CMD_BATTERY: u8 = 0x0a;
 const CMD_LIVE_LEDS: u8 = 0x10;
 const CMD_PROFILE_TABLE: u8 = 0x11;
@@ -494,6 +496,28 @@ pub fn parse_battery(report: &Report) -> Option<Battery> {
         raw: report[BATTERY_OFFSET],
         cable_power: report[BATTERY_CABLE_POWER_OFFSET] == 0x01,
         charging: report[BATTERY_CHARGING_OFFSET] == 0x01,
+    })
+}
+
+/// A function the mouse reports by itself when one of its buttons carries
+/// it out, e.g. a profile switch (`46` next, `47` previous, `48`–`4a` a
+/// profile preset), or one the official software carries out (`40` with a
+/// `0b` entry). Codes as in block 2 of the buttons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FunctionEvent {
+    /// Function code.
+    pub code: u8,
+    /// The two bytes of the button entry.
+    pub entry: [u8; 2],
+    pub slot: u8,
+}
+
+/// Parses `90 07 04 00 <code> <entry> <slot>`.
+pub fn parse_function_event(report: &Report) -> Option<FunctionEvent> {
+    is_data_reply(report, CMD_FUNCTION_EVENT, FUNCTION_EVENT_LEN).then(|| FunctionEvent {
+        code: report[4],
+        entry: [report[5], report[6]],
+        slot: report[7],
     })
 }
 
