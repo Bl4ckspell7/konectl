@@ -189,7 +189,7 @@ shown as 50.
 | `06`   | wave                             |
 | `08`   | blinking                         |
 | `09`   | AIMO (intelligent lighting)      |
-| `0a`   | battery indication (Swarm sets brightness to 100) |
+| `0a`   | battery indication (Swarm sets brightness to 100); at full battery the mouse breathes in the zone colours, and Swarm sends no live colours for it |
 
 The colours are kept when switching effects. With effect `09`, `90 01` answers
 with the colours that are currently shown, not the saved ones.
