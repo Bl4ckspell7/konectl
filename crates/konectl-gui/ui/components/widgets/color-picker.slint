@@ -74,6 +74,12 @@ export component ColorButton {
     in property <bool> allow-none;
     in property <bool> enabled: true;
     in property <string> label;
+    // Where the picker opens, from the button's left edge (to keep it inside
+    // the window when the button is at the right).
+    in property <length> popup-x: 0;
+    // Only the picker, opened with `open()`: the swatch is not drawn and
+    // takes no clicks.
+    in property <bool> swatch-hidden;
     callback picked(color);
     callback cleared();
 
@@ -94,7 +100,7 @@ export component ColorButton {
         root.open();
     }
 
-    function open() {
+    public function open() {
         root.hue = root.color.to-hsv().hue / 360;
         root.saturation = root.color.to-hsv().saturation;
         popup.show();
@@ -112,6 +118,7 @@ export component ColorButton {
     }
 
     Rectangle {
+        visible: !root.swatch-hidden;
         border-radius: 6px;
         border-width: 1px;
         border-color: Palette.border;
@@ -147,7 +154,7 @@ export component ColorButton {
     }
 
     popup := PopupWindow {
-        x: 0;
+        x: root.popup-x;
         y: root.height + 4px;
         width: 256px;
         close-policy: close-on-click-outside;
