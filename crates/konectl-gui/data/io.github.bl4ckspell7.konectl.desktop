@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=konectl
+GenericName=Mouse Settings
+Comment=Configure the ROCCAT Kone Pro Air mouse
+Type=Application
+Exec=konectl-gui
+Icon=io.github.bl4ckspell7.konectl
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=mouse;roccat;kone;dpi;lighting;rgb;buttons;macro;
+StartupNotify=true
+StartupWMClass=io.github.bl4ckspell7.konectl
