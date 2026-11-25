@@ -1,9 +1,14 @@
-// The konectl command line that makes the same change as the last one.
-import { Button, Palette } from "std-widgets.slint";
+// The konectl command line that makes the same change as the last one. A
+// restore or its undo can take dozens of lines: the bar shows up to four and
+// scrolls; Copy copies all.
+import { Button, Palette, ScrollView } from "std-widgets.slint";
 import { Theme } from "../../globals/theme.slint";
 
 export component CommandBar inherits Rectangle {
     in property <string> commands;
+    // Four lines of the command text.
+    property <length> most: 4 * one-line.preferred-height;
+    property <length> shown: min(lines.preferred-height, root.most);
 
     background: Theme.sidebar;
 
@@ -11,6 +16,14 @@ export component CommandBar inherits Rectangle {
         y: 0;
         height: 1px;
         background: Palette.border;
+    }
+
+    // Measures a line; never shown.
+    one-line := Text {
+        visible: false;
+        text: "konectl";
+        font-family: "monospace";
+        font-size: 12px;
     }
 
     HorizontalLayout {
@@ -31,13 +44,22 @@ export component CommandBar inherits Rectangle {
             horizontal-stretch: 1;
             alignment: center;
 
-            lines := TextInput {
-                text: root.commands != "" ? root.commands : "The command for each change shows here.";
-                color: root.commands != "" ? Palette.foreground : Theme.muted;
-                read-only: true;
-                single-line: false;
-                font-family: "monospace";
-                font-size: 12px;
+            ScrollView {
+                min-height: root.shown;
+                max-height: root.shown;
+                content-width: self.visible-width;
+                content-height: lines.preferred-height;
+
+                lines := TextInput {
+                    width: parent.width;
+                    height: self.preferred-height;
+                    text: root.commands != "" ? root.commands : "The command for each change shows here.";
+                    color: root.commands != "" ? Palette.foreground : Theme.muted;
+                    read-only: true;
+                    single-line: false;
+                    font-family: "monospace";
+                    font-size: 12px;
+                }
             }
         }
 
