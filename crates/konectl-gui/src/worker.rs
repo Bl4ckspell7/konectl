@@ -141,6 +141,7 @@ impl Worker {
     /// Runs the polling tasks that are due.
     pub fn tick(&mut self, now: Instant) {
         while let Some(task) = self.schedule.next_due(now) {
+            log::trace!("poll: {task:?}");
             self.schedule.done(task, now);
             match task {
                 Task::Connect => self.connect(now),
@@ -153,6 +154,7 @@ impl Worker {
     }
 
     pub fn handle(&mut self, request: Request, now: Instant) {
+        log_request(&request);
         match request {
             Request::Reload => {
                 // Undo compares with the snapshot; after reading everything
@@ -201,6 +203,7 @@ impl Worker {
     }
 
     fn send(&mut self, event: Event) {
+        log_event(&event);
         (self.sink)(event);
     }
 
@@ -378,7 +381,8 @@ impl Worker {
             return;
         };
         let active: u8 = sensor.profile();
-        let mut changed: bool = snapshot.backup.active_profile != active;
+        let mut switched: bool = snapshot.backup.active_profile != active;
+        let mut changed: bool = switched;
         snapshot.backup.active_profile = active;
         if let Some(profile) = snapshot
             .backup
@@ -386,8 +390,17 @@ impl Worker {
             .iter_mut()
             .find(|profile| profile.settings.profile() == active)
         {
+            switched |= profile.settings.sensor.active_stage() != sensor.active_stage();
             changed |= profile.settings.sensor != sensor;
             profile.settings.sensor = sensor;
+        }
+        if switched {
+            log::info!(
+                "the mouse switched to profile {active}, DPI stage {}",
+                sensor.active_stage()
+            );
+        } else if changed {
+            log::debug!("the sensor settings of profile {active} changed outside this app");
         }
         if changed {
             let snapshot: Snapshot = snapshot.clone();
@@ -416,6 +429,90 @@ impl Worker {
             Err(message) => self.send(Event::Error(message)),
         }
     }
+}
+
+/// Logs what the user interface is told: connection states, changes with
+/// their commands, notes and errors (the rest only at `trace`).
+fn log_event(event: &Event) {
+    match event {
+        Event::Searching { problem: None } => log::info!("no mouse found; looking for it"),
+        Event::Searching {
+            problem: Some(problem),
+        } => log::warn!("the mouse cannot be used: {problem}"),
+        Event::NoAccess => log::info!("a mouse is connected, but this user may not open it"),
+        Event::Asleep => log::info!("the mouse does not answer (asleep or switched off)"),
+        Event::Connected(snapshot) => {
+            let active = snapshot.backup.active_profile;
+            log::info!(
+                "connected over the {}: firmware {}{}, {} profiles, profile {active} active",
+                snapshot.mode,
+                snapshot.firmwares.mouse,
+                snapshot
+                    .firmwares
+                    .dongle
+                    .map_or_else(String::new, |dongle| format!(", dongle {dongle}")),
+                snapshot.backup.profiles.len()
+            );
+        }
+        Event::Changed(change) => {
+            for line in &change.commands.lines {
+                log::info!("changed: {}", hide_macro_keys(line));
+            }
+            if !change.commands.complete {
+                log::info!("changed: (partly without a konectl command)");
+            }
+            if let Some(note) = &change.note {
+                log::info!("{note}");
+            }
+        }
+        Event::Reverted(_) => log::debug!("the controls show the mouse's settings again"),
+        Event::Error(message) => log::warn!("{message}"),
+        Event::Message(message) => log::info!("{message}"),
+        Event::ChangedElsewhere => log::info!("another program changed the mouse settings"),
+        Event::Pairing(Some(step)) => log::info!("pairing: waiting for {step:?}"),
+        Event::Pairing(None) => log::debug!("pairing is over"),
+        Event::Calibration(None) => log::debug!("the calibration is over"),
+        Event::UndoAvailable(_) | Event::Status(_) | Event::Busy(_) | Event::Calibration(_) => {
+            log::trace!("{event:?}");
+        }
+    }
+}
+
+/// Logs a request at `debug`, without the keys of a macro.
+fn log_request(request: &Request) {
+    match request {
+        Request::SetMacro {
+            profile,
+            button,
+            layer,
+            mode,
+            ..
+        } => log::debug!(
+            "request SetMacro {{ profile: {profile}, button: {button}, layer: {layer:?}, \
+             mode: {mode:?}, keys not logged }}"
+        ),
+        request => log::debug!("request {request:?}"),
+    }
+}
+
+/// A command line without the keys of a macro (`macro:…`): they may be
+/// anything the user types, and logs end up in bug reports.
+fn hide_macro_keys(line: &str) -> String {
+    let Some(start) = line.find("macro:") else {
+        return line.to_owned();
+    };
+    let keys: usize = start + "macro:".len();
+    // Quoted (`'macro:a, b'`) up to the closing quote, else up to the space.
+    let end: usize = if line[..start].ends_with('\'') {
+        line[keys..]
+            .find('\'')
+            .map_or(line.len(), |quote| keys + quote)
+    } else {
+        line[keys..]
+            .find(' ')
+            .map_or(line.len(), |space| keys + space)
+    };
+    format!("{}…{}", &line[..keys], &line[end..])
 }
 
 /// When `previous.txt` was last written.
@@ -1199,6 +1296,22 @@ mod tests {
             .iter()
             .map(|profile| profile.settings.sensor.debounce_ms())
             .collect()
+    }
+
+    #[test]
+    fn macro_keys_stay_out_of_the_log() {
+        assert_eq!(
+            hide_macro_keys("konectl button 3 'macro:p, a, s, s' -p 1"),
+            "konectl button 3 'macro:…' -p 1"
+        );
+        assert_eq!(
+            hide_macro_keys("konectl button 3 macro:a,b --repeat 3 -p 1"),
+            "konectl button 3 macro:… --repeat 3 -p 1"
+        );
+        assert_eq!(
+            hide_macro_keys("konectl dpi 2 900 -p 1"),
+            "konectl dpi 2 900 -p 1"
+        );
     }
 
     #[test]

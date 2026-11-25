@@ -45,7 +45,9 @@ pub fn install(ui: &AppWindow, requests: &Requests, backups_folder: Option<Strin
                 .set_directory(home())
                 .set_file_name(backup_name(SystemTime::now()))
                 .add_filter("konectl backup", &["txt"])
-                .save_file()?;
+                .save_file()
+                .or_else(cancelled)?;
+            log::info!("saving the settings to {}", path.display());
             sender.send(Request::SaveBackup(path));
             Some(())
         });
@@ -58,7 +60,9 @@ pub fn install(ui: &AppWindow, requests: &Requests, backups_folder: Option<Strin
                 .set_title("Restore the mouse settings")
                 .set_directory(home())
                 .add_filter("konectl backup", &["txt"])
-                .pick_file()?;
+                .pick_file()
+                .or_else(cancelled)?;
+            log::info!("restoring the settings from {}", path.display());
             sender.send(Request::RestoreBackup(path));
             Some(())
         });
@@ -73,8 +77,14 @@ fn dialog(run: impl FnOnce() -> Option<()> + Send + 'static) {
             run();
         });
     if let Err(error) = spawned {
-        eprintln!("konectl-gui: cannot open the file dialog: {error}");
+        log::error!("cannot open the file dialog: {error}");
     }
+}
+
+/// A file dialog without a choice (cancelled, or no portal answered).
+fn cancelled() -> Option<PathBuf> {
+    log::debug!("file dialog: no file chosen");
+    None
 }
 
 fn home() -> PathBuf {

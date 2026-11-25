@@ -22,9 +22,23 @@ pub fn start(window: &AppWindow) -> std::io::Result<WorkerHandle> {
     let model: ui::SharedModel = ui::SharedModel::default();
     // The demo never touches the safety backups of the real mouse.
     let backups: Option<SafetyBackups> = if in_demo {
+        log::info!(
+            "demo mode ({}={}): no mouse is changed",
+            demo::DEMO_VAR,
+            std::env::var(demo::DEMO_VAR).unwrap_or_default()
+        );
         None
     } else {
-        SafetyBackups::from_env().ok()
+        match SafetyBackups::from_env() {
+            Ok(backups) => {
+                log::info!("safety backups in {}", backups.directory().display());
+                Some(backups)
+            }
+            Err(error) => {
+                log::warn!("no safety backups: {error}");
+                None
+            }
+        }
     };
     let folder: Option<String> = backups
         .as_ref()
