@@ -26,11 +26,14 @@ pub fn start(window: &AppWindow) -> std::io::Result<WorkerHandle> {
     } else {
         SafetyBackups::from_env().ok()
     };
+    let folder: Option<String> = backups
+        .as_ref()
+        .map(|backups| backups.directory().display().to_string());
     let worker = WorkerHandle::spawn(
         connector,
         backups,
         ui::app::sink(window.as_weak(), model.clone()),
     )?;
-    ui::app::install(window, &worker.requests(), &model, in_demo);
+    ui::app::install(window, &worker.requests(), &model, in_demo, folder);
     Ok(worker)
 }

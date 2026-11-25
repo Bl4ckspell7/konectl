@@ -4,6 +4,7 @@ import { AppState, MouseState, DeviceView, ParsedColor, ProfileView } from "glob
 import { Lighting } from "globals/lighting.slint";
 import { Performance, StageView } from "globals/performance.slint";
 import { ButtonPage, ButtonView } from "globals/buttons.slint";
+import { DeviceSettings } from "globals/device.slint";
 import { Theme } from "globals/theme.slint";
 import { Sidebar } from "components/widgets/sidebar.slint";
 import { Banner, BannerKind } from "components/widgets/banner.slint";
@@ -17,7 +18,7 @@ import { PerformancePage } from "pages/performance.slint";
 import { ButtonsPage } from "pages/buttons.slint";
 import { StatePage } from "pages/state.slint";
 
-export { AppState, MouseState, DeviceView, ParsedColor, ProfileView, Lighting, Performance, StageView, ButtonPage, ButtonView }
+export { AppState, MouseState, DeviceView, ParsedColor, ProfileView, Lighting, Performance, StageView, ButtonPage, ButtonView, DeviceSettings }
 
 export component AppWindow inherits Window {
     property <[string]> pages: ["Performance", "Lighting", "Buttons", "Device"];
@@ -230,6 +231,7 @@ export component AppWindow inherits Window {
                         y: Theme.padding;
                         width: parent.width - 2 * Theme.padding;
                         height: self.preferred-height;
+                        idle: root.idle;
                     }
                 }
 

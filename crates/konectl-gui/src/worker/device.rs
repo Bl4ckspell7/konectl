@@ -2,15 +2,18 @@
 //! (`demo.rs`). The worker only talks to these traits, so its tests and the
 //! demo mode need no hardware.
 
+use std::any::Any;
 use std::ffi::OsStr;
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
+use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 
+use konectl::pairing::{self, PairingStep};
 use konectl::{
-    Backup, Buttons, ConnectionMode, Firmware, HidTransport, KoneProAir, Layer, Macro, Manager,
-    ProfileSettings, RemovedProfile, Rgb, Sensor,
+    Backup, Buttons, ConnectionMode, Firmware, HidTransport, KoneProAir, Layer, LiftOff, Macro,
+    Manager, ProfileSettings, RemovedProfile, Rgb, Sensor,
 };
 
 use crate::access::{self, Outcome};
@@ -81,7 +84,30 @@ pub trait Device {
         layer: Layer,
         macro_: &Macro,
     ) -> konectl::Result<()>;
+
+    /// One setting for all profiles; checked by reading it back.
+    fn set_energy_saving(&mut self, enabled: bool) -> konectl::Result<()>;
+    /// Sets the debounce time in every profile.
+    fn set_debounce(&mut self, ms: u8) -> konectl::Result<()>;
+    /// Starts measuring the lift-off distance; the mouse is then moved for
+    /// [`konectl::LIFT_OFF_CALIBRATION_SECONDS`].
+    fn start_lift_off_calibration(&mut self) -> konectl::Result<()>;
+    fn finish_lift_off_calibration(&mut self) -> konectl::Result<()>;
+    /// Sets the lift-off distance in every profile.
+    fn set_lift_off_all(&mut self, lift_off: LiftOff) -> konectl::Result<()>;
+    /// Back to the factory settings (energy saving on).
+    fn reset(&mut self) -> konectl::Result<()>;
+    /// Puts the dongle into pairing mode (see [`Connector::finish_pairing`]).
+    fn start_pairing(&mut self) -> konectl::Result<()>;
+    /// Whether `backup` fits this mouse (firmware, profile numbers).
+    fn check_backup(&mut self, backup: &Backup) -> konectl::Result<()>;
+
+    /// For [`Connector::finish_pairing`], which needs the device itself.
+    fn into_any(self: Box<Self>) -> Box<dyn Any>;
 }
+
+/// Called with the step pairing waits for; `Break` cancels it.
+pub type OnPairingStep<'a> = dyn FnMut(PairingStep) -> ControlFlow<()> + 'a;
 
 /// Why no mouse could be opened.
 #[derive(Debug)]
@@ -103,6 +129,16 @@ pub trait Connector {
 
     /// Gives this user access to the mouse (see [`access::allow`]).
     fn allow_access(&mut self) -> Result<Outcome, String>;
+
+    /// After [`Device::start_pairing`]: waits until the dongle was unplugged
+    /// and plugged in again and the mouse answers through it (see
+    /// [`konectl::pairing::finish_pairing`]), and returns the new device.
+    /// `dongle` is closed either way.
+    fn finish_pairing(
+        &mut self,
+        dongle: Box<dyn Device>,
+        on_step: &mut OnPairingStep<'_>,
+    ) -> konectl::Result<Box<dyn Device>>;
 }
 
 impl Device for KoneProAir<HidTransport> {
@@ -206,6 +242,42 @@ impl Device for KoneProAir<HidTransport> {
     ) -> konectl::Result<()> {
         KoneProAir::write_macro(self, buttons, button, layer, macro_)
     }
+
+    fn set_energy_saving(&mut self, enabled: bool) -> konectl::Result<()> {
+        KoneProAir::set_energy_saving(self, enabled)
+    }
+
+    fn set_debounce(&mut self, ms: u8) -> konectl::Result<()> {
+        KoneProAir::set_debounce(self, ms)
+    }
+
+    fn start_lift_off_calibration(&mut self) -> konectl::Result<()> {
+        KoneProAir::start_lift_off_calibration(self)
+    }
+
+    fn finish_lift_off_calibration(&mut self) -> konectl::Result<()> {
+        KoneProAir::finish_lift_off_calibration(self)
+    }
+
+    fn set_lift_off_all(&mut self, lift_off: LiftOff) -> konectl::Result<()> {
+        KoneProAir::set_lift_off_all(self, lift_off).map(|_| ())
+    }
+
+    fn reset(&mut self) -> konectl::Result<()> {
+        KoneProAir::reset(self)
+    }
+
+    fn start_pairing(&mut self) -> konectl::Result<()> {
+        KoneProAir::start_pairing(self)
+    }
+
+    fn check_backup(&mut self, backup: &Backup) -> konectl::Result<()> {
+        KoneProAir::check_backup(self, backup)
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
 }
 
 /// The real mouse, through hidapi.
@@ -266,5 +338,19 @@ impl Connector for HidConnector {
 
     fn allow_access(&mut self) -> Result<Outcome, String> {
         access::allow()
+    }
+
+    fn finish_pairing(
+        &mut self,
+        dongle: Box<dyn Device>,
+        on_step: &mut OnPairingStep<'_>,
+    ) -> konectl::Result<Box<dyn Device>> {
+        let dongle: Box<KoneProAir<HidTransport>> = dongle
+            .into_any()
+            .downcast()
+            .map_err(|_| konectl::Error::InvalidValue("not a mouse opened here".to_owned()))?;
+        let manager: &mut Manager = self.refreshed()?;
+        let mouse = pairing::finish_pairing(manager, *dongle, on_step)?;
+        Ok(Box::new(mouse))
     }
 }

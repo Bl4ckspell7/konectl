@@ -1,44 +1,363 @@
-// The Device page: what the mouse is and how it is connected.
-import { AppState } from "../globals/app-state.slint";
+// The Device page: what the mouse is and how it is connected, settings for
+// the whole mouse, lift-off calibration, pairing, backups and factory reset.
+import { Button, Palette, SpinBox, Switch } from "std-widgets.slint";
+import { AppState, MouseState } from "../globals/app-state.slint";
+import { DeviceSettings } from "../globals/device.slint";
 import { Theme } from "../globals/theme.slint";
-import { Group, InfoRow } from "../components/widgets/group.slint";
+import { Group, InfoRow, Row } from "../components/widgets/group.slint";
+import { DialogFrame, Note } from "../components/widgets/dialog.slint";
+import { PairingDialog } from "../components/pairing-dialog.slint";
 
 export component DevicePage {
-    VerticalLayout {
+    in property <bool> idle;
+    property <length> label-width: 120px;
+    property <length> dialog-width: 420px;
+    property <bool> calibration-started;
+    // Pairing needs only the dongle, so it works while the mouse sleeps too.
+    property <bool> can-pair: !AppState.busy && (AppState.state == MouseState.asleep
+        || (AppState.state == MouseState.connected && DeviceSettings.wireless));
+    // The worker ends every calibration request with this, also when it
+    // failed before the countdown.
+    property <int> calibration-ended: DeviceSettings.calibration-ended;
+
+    changed calibration-ended => {
+        if self.calibration-started {
+            self.calibration-started = false;
+            calibration.close();
+        }
+    }
+
+    HorizontalLayout {
+        spacing: Theme.padding;
         alignment: start;
-        spacing: Theme.spacing;
 
-        Group {
-            title: "Device";
+        VerticalLayout {
+            alignment: start;
+            spacing: Theme.padding;
+            horizontal-stretch: 1;
+            min-width: 360px;
 
-            InfoRow {
-                label: "Connection";
-                value: AppState.device.connection;
+            Group {
+                title: "Device";
+
+                InfoRow {
+                    label: "Connection";
+                    value: AppState.device.connection;
+                }
+
+                InfoRow {
+                    label: "Firmware";
+                    value: AppState.device.firmware;
+                }
+
+                InfoRow {
+                    label: "Battery";
+                    value: AppState.device.battery;
+                }
+
+                InfoRow {
+                    label: "Signal";
+                    value: AppState.device.signal;
+                }
+
+                InfoRow {
+                    label: "Profiles";
+                    value: AppState.device.profiles;
+                }
             }
 
-            InfoRow {
-                label: "Firmware";
-                value: AppState.device.firmware;
+            Group {
+                title: "All profiles";
+
+                Row {
+                    label: "Energy saving";
+                    label-width: root.label-width;
+
+                    Switch {
+                        checked <=> DeviceSettings.energy-saving;
+                        enabled: root.idle && DeviceSettings.energy-saving-known;
+                        toggled => {
+                            DeviceSettings.set-energy-saving(self.checked);
+                        }
+                    }
+                }
+
+                Row {
+                    label: "Debounce";
+                    label-width: root.label-width;
+
+                    SpinBox {
+                        minimum: 0;
+                        maximum: 10;
+                        value <=> DeviceSettings.debounce;
+                        enabled: root.idle;
+                        min-width: 110px;
+                        max-width: 140px;
+                        edited(value) => {
+                            DeviceSettings.set-debounce(value);
+                        }
+                    }
+
+                    Text {
+                        text: "ms";
+                        color: Theme.muted;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                }
+
+                Note {
+                    text: "How long a click must settle before the next one counts. Energy saving and the debounce time apply to every profile.";
+                }
+
+                Row {
+                    label: "Lift-off";
+                    label-width: root.label-width;
+
+                    Button {
+                        text: "Calibrate …";
+                        enabled: root.idle;
+                        clicked => {
+                            calibration.show();
+                        }
+                    }
+
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
+                }
+
+                Note {
+                    text: "Measures the lift-off distance on your surface and uses it in every profile.";
+                }
+            }
+        }
+
+        VerticalLayout {
+            alignment: start;
+            spacing: Theme.padding;
+            horizontal-stretch: 1;
+            min-width: 360px;
+
+            Group {
+                title: "Pairing";
+
+                Note {
+                    text: DeviceSettings.wireless
+                        ? "Connects the mouse to this dongle, e.g. after replacing the dongle or the mouse."
+                        : "Pairing works through the dongle: unplug the USB cable from the mouse first.";
+                }
+
+                HorizontalLayout {
+                    alignment: start;
+
+                    Button {
+                        text: "Pair …";
+                        enabled: root.can-pair;
+                        clicked => {
+                            pairing.open();
+                        }
+                    }
+                }
             }
 
-            InfoRow {
-                label: "Battery";
-                value: AppState.device.battery;
+            Group {
+                title: "Backups";
+
+                HorizontalLayout {
+                    alignment: start;
+                    spacing: Theme.spacing;
+
+                    Button {
+                        text: "Save to file …";
+                        enabled: root.idle;
+                        clicked => {
+                            DeviceSettings.save-backup();
+                        }
+                    }
+
+                    Button {
+                        text: "Restore from file …";
+                        enabled: root.idle;
+                        clicked => {
+                            DeviceSettings.restore-backup();
+                        }
+                    }
+                }
+
+                Note {
+                    text: "A backup has the profiles with their settings, lighting and buttons. Energy saving, the lift-off calibration and macro keys are not in it.";
+                }
+
+                HorizontalLayout {
+                    alignment: start;
+
+                    Button {
+                        text: "Restore original settings …";
+                        enabled: root.idle && DeviceSettings.backups-folder != "";
+                        clicked => {
+                            original.show();
+                        }
+                    }
+                }
+
+                Note {
+                    text: DeviceSettings.backups-folder != ""
+                        ? "Before every change, konectl saves the settings in " + DeviceSettings.backups-folder + " (previous.txt; original.txt before its first change)."
+                        : "Demo mode keeps no safety backups.";
+                }
             }
 
-            InfoRow {
-                label: "Signal";
-                value: AppState.device.signal;
+            Group {
+                title: "Factory reset";
+
+                Note {
+                    text: "Gives every profile the factory settings, lighting, buttons and colour.";
+                }
+
+                HorizontalLayout {
+                    alignment: start;
+
+                    Button {
+                        text: "Reset …";
+                        enabled: root.idle;
+                        clicked => {
+                            reset.show();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pairing := PairingDialog {
+        available: root.can-pair;
+    }
+
+    calibration := PopupWindow {
+        x: (root.width - root.dialog-width) / 2;
+        y: 24px;
+        width: root.dialog-width;
+        close-policy: no-auto-close;
+
+        DialogFrame {
+            title: "Lift-off calibration";
+
+            Text {
+                text: DeviceSettings.calibrating
+                    ? "Keep moving the mouse on the surface …"
+                    : "Put the mouse on the surface you use. After Start, move it continuously for 12 seconds. Every profile then uses the measured distance.";
+                wrap: word-wrap;
             }
 
-            InfoRow {
-                label: "Profiles";
-                value: AppState.device.profiles;
+            // Always there: a popup keeps the height it opened with.
+            Text {
+                text: (DeviceSettings.calibrating ? DeviceSettings.calibration-left : 12) + " s";
+                font-size: 28px;
+                font-weight: 600;
+                color: DeviceSettings.calibrating ? Palette.foreground : Theme.muted;
+                horizontal-alignment: center;
             }
 
-            InfoRow {
-                label: "Energy saving";
-                value: AppState.device.energy-saving;
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.spacing;
+
+                Button {
+                    text: "Cancel";
+                    enabled: !root.calibration-started;
+                    clicked => {
+                        calibration.close();
+                    }
+                }
+
+                Button {
+                    text: "Start";
+                    primary: true;
+                    enabled: root.idle && !root.calibration-started;
+                    clicked => {
+                        root.calibration-started = true;
+                        DeviceSettings.calibrate();
+                    }
+                }
+            }
+        }
+    }
+
+    reset := PopupWindow {
+        x: (root.width - root.dialog-width) / 2;
+        y: 24px;
+        width: root.dialog-width;
+        close-policy: close-on-click-outside;
+
+        DialogFrame {
+            title: "Reset the mouse to its factory settings?";
+
+            Text {
+                text: "Every profile gets the factory settings, lighting, buttons and colour; the number of profiles stays. Energy saving is switched on. Undo brings the profiles back, but not energy saving or the lift-off calibration.";
+                wrap: word-wrap;
+                color: Theme.muted;
+            }
+
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.spacing;
+
+                Button {
+                    text: "Cancel";
+                    clicked => {
+                        reset.close();
+                    }
+                }
+
+                Button {
+                    text: "Reset";
+                    primary: true;
+                    enabled: root.idle;
+                    clicked => {
+                        reset.close();
+                        DeviceSettings.reset();
+                    }
+                }
+            }
+        }
+    }
+
+    original := PopupWindow {
+        x: (root.width - root.dialog-width) / 2;
+        y: 24px;
+        width: root.dialog-width;
+        close-policy: close-on-click-outside;
+
+        DialogFrame {
+            title: "Restore the original settings?";
+
+            Text {
+                text: "Writes back the settings from before konectl's first change (original.txt). Undo brings back the current ones.";
+                wrap: word-wrap;
+                color: Theme.muted;
+            }
+
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.spacing;
+
+                Button {
+                    text: "Cancel";
+                    clicked => {
+                        original.close();
+                    }
+                }
+
+                Button {
+                    text: "Restore";
+                    primary: true;
+                    enabled: root.idle;
+                    clicked => {
+                        original.close();
+                        DeviceSettings.restore-original();
+                    }
+                }
             }
         }
     }

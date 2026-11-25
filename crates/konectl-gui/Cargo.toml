@@ -28,6 +28,9 @@ slint = { version = "1.19.1", default-features = false, features = [
     "compat-1-2",
 ] }
 
+# File dialogs through the XDG desktop portal (also inside the Flatpak).
+rfd = { version = "0.18.0", default-features = false, features = ["xdg-portal"] }
+
 [features]
 # `konectl-gui --screenshots DIR` draws the demo screens into image files, without
 # a window (for the README and for reviewing layouts).

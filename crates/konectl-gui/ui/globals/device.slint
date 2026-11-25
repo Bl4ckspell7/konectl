@@ -1,0 +1,34 @@
+// The Device page, set from Rust (`src/ui/device.rs`).
+export global DeviceSettings {
+    // Energy saving, if it could be read.
+    in property <bool> energy-saving-known;
+    in-out property <bool> energy-saving;
+    // Debounce time in ms (the same in all profiles, as the official
+    // software sets it).
+    in-out property <int> debounce;
+    // Connected through the dongle: only then pairing works.
+    in property <bool> wireless;
+    // The lift-off calibration runs, with seconds left.
+    in property <bool> calibrating;
+    in property <int> calibration-left;
+    // Pairing waits for a step: 0 unplug the dongle, 1 plug it in again,
+    // 2 the mouse to answer.
+    in property <bool> pairing;
+    in property <int> pairing-step;
+    // Count the ended calibration and pairing requests, failed ones too:
+    // their dialogs close on a change.
+    in property <int> calibration-ended;
+    in property <int> pairing-ended;
+    // Where the safety backups are; empty when there are none (demo).
+    in property <string> backups-folder;
+
+    callback set-energy-saving(bool);
+    callback set-debounce(int);
+    callback calibrate();
+    callback pair();
+    callback cancel-pairing();
+    callback reset();
+    callback save-backup();
+    callback restore-backup();
+    callback restore-original();
+}

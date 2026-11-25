@@ -1,0 +1,119 @@
+// The pairing dialog: the steps, and while pairing which one the dongle
+// waits for. Used on the Device page and on the "does not answer" screen (a
+// mouse that was never paired with this dongle does not answer). Place it
+// over the area to center in; `open()` shows it.
+import { Button } from "std-widgets.slint";
+import { DeviceSettings } from "../globals/device.slint";
+import { Theme } from "../globals/theme.slint";
+import { DialogFrame, Note } from "widgets/dialog.slint";
+
+// A step: highlighted while pairing waits for it.
+component Step {
+    in property <int> number;
+    in property <string> text;
+    in property <bool> current;
+
+    HorizontalLayout {
+        spacing: 8px;
+
+        Text {
+            text: root.number + ".";
+            font-weight: root.current ? 600 : 400;
+            min-width: 16px;
+        }
+
+        Text {
+            text: root.text;
+            font-weight: root.current ? 600 : 400;
+            wrap: word-wrap;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
+export component PairingDialog {
+    // Pairing can start: connected through the dongle, nothing else running.
+    in property <bool> available;
+    property <length> dialog-width: 420px;
+    property <bool> started;
+    // The worker ends every pairing request with this, also when it failed
+    // before the first step.
+    property <int> ended: DeviceSettings.pairing-ended;
+
+    public function open() {
+        popup.show();
+    }
+
+    changed ended => {
+        if self.started {
+            self.started = false;
+            popup.close();
+        }
+    }
+
+    popup := PopupWindow {
+        x: (root.width - root.dialog-width) / 2;
+        y: 24px;
+        width: root.dialog-width;
+        close-policy: no-auto-close;
+
+        DialogFrame {
+            title: "Pair the mouse with the dongle";
+
+            Text {
+                text: DeviceSettings.pairing ? "The dongle is waiting for the mouse. Now:" : "After Start, the dongle waits for the mouse. Then:";
+                wrap: word-wrap;
+            }
+
+            Step {
+                number: 1;
+                text: "Unplug the USB cable from the mouse and switch the mouse on.";
+            }
+
+            Step {
+                number: 2;
+                text: "Hold the profile button (button 8, underneath) for 3 seconds.";
+            }
+
+            Step {
+                number: 3;
+                text: "When the lighting effect has finished, unplug the dongle and plug it in again.";
+                current: DeviceSettings.pairing && DeviceSettings.pairing-step <= 1;
+            }
+
+            // Always there: a popup keeps the height it opened with.
+            Note {
+                text: !DeviceSettings.pairing ? (root.started ? "Starting …" : "Not started yet.")
+                    : DeviceSettings.pairing-step == 0 ? "Waiting for the dongle to be unplugged …"
+                    : DeviceSettings.pairing-step == 1 ? "Waiting for the dongle to be plugged in again …"
+                    : "Waiting for the mouse to answer …";
+            }
+
+            HorizontalLayout {
+                alignment: end;
+                spacing: Theme.spacing;
+
+                Button {
+                    text: "Cancel";
+                    clicked => {
+                        if root.started {
+                            DeviceSettings.cancel-pairing();
+                        } else {
+                            popup.close();
+                        }
+                    }
+                }
+
+                Button {
+                    text: "Start";
+                    primary: true;
+                    enabled: root.available && !root.started;
+                    clicked => {
+                        root.started = true;
+                        DeviceSettings.pair();
+                    }
+                }
+            }
+        }
+    }
+}

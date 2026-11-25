@@ -10,7 +10,13 @@ use crate::view;
 use crate::worker::{Change, Event, Request, Requests, Sink, Snapshot};
 
 /// Wires the global callbacks to the worker.
-pub fn install(ui: &AppWindow, requests: &Requests, model: &SharedModel, demo: bool) {
+pub fn install(
+    ui: &AppWindow,
+    requests: &Requests,
+    model: &SharedModel,
+    demo: bool,
+    backups_folder: Option<String>,
+) {
     let state = ui.global::<AppState>();
     state.set_demo(demo);
     state.set_in_flatpak(access::in_flatpak());
@@ -29,6 +35,7 @@ pub fn install(ui: &AppWindow, requests: &Requests, model: &SharedModel, demo: b
     super::performance::install(ui, requests, model);
     super::buttons::install(ui, requests, model);
     super::lighting::install(ui, requests);
+    super::device::install(ui, requests, backups_folder);
 }
 
 /// Passes the worker's events to the UI thread.
@@ -103,7 +110,10 @@ pub fn apply(ui: &AppWindow, model: &mut Model, event: Event) {
             state.set_busy_text(what.unwrap_or_default().into());
         }
         Event::Error(message) => state.set_error(message.into()),
+        Event::Message(message) => state.set_message(message.into()),
         Event::ChangedElsewhere => state.set_changed_elsewhere(true),
+        Event::Calibration(left) => super::device::show_calibration(ui, left),
+        Event::Pairing(step) => super::device::show_pairing(ui, step),
     }
 }
 
@@ -136,6 +146,7 @@ fn show(ui: &AppWindow, model: &mut Model, snapshot: Snapshot, select: Option<u8
         .unwrap_or(snapshot.backup.active_profile);
     state.set_profile(i32::from(profile));
     state.set_device(view::device(&snapshot));
+    super::device::show(ui, &snapshot);
     state.set_has_snapshot(true);
     model.snapshot = Some(snapshot);
     show_profile(ui, model);
