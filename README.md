@@ -177,6 +177,13 @@ first change ever is kept in `original.txt`. Undo a change with
 `raw` is a tool for protocol work. Unknown commands can change or break the mouse
 configuration, so only send what the official software was seen sending.
 
+## Troubleshooting
+
+Both programs log to stderr. `konectl-gui` reports each change and every failure;
+`RUST_LOG=konectl=debug` adds what it does, and `RUST_LOG=konectl=trace` (also for `konectl`)
+every report sent to and read from the mouse, which helps with bug reports. For the
+Flatpak: `flatpak run --env=RUST_LOG=konectl=trace io.github.bl4ckspell7.konectl`.
+
 ## Library
 
 ```rust
