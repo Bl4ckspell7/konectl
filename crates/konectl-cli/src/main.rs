@@ -453,6 +453,9 @@ enum UdevAction {
 }
 
 fn main() -> Result<()> {
+    // Quiet unless asked: `RUST_LOG=konectl=trace konectl …` shows every report
+    // sent to and read from the mouse on stderr.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let cli: Cli = Cli::parse();
     // The udev commands work without HID access; that is what they set up.
     #[cfg(target_os = "linux")]

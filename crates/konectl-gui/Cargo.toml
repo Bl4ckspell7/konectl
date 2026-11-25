@@ -13,6 +13,8 @@ readme = "../../README.md"
 
 [dependencies]
 konectl.workspace = true
+env_logger.workspace = true
+log.workspace = true
 # winit (X11 and Wayland) with the OpenGL renderer, and the software renderer
 # (with vector paths) for machines without a usable GPU driver. No Qt backend:
 # it would need the Qt development files to build.

@@ -51,6 +51,31 @@ With the mouse connected and awake, `cargo test -p konectl-gui -- --ignored
 --test-threads=1` reads it and writes a few changes, then undoes them and checks that the
 mouse is as before.
 
+## Logging
+
+The library, the CLI and the GUI log through the `log` crate; the programs print to stderr
+with env_logger, filtered by `RUST_LOG`:
+
+| Level   | What                                                                      |
+|---------|---------------------------------------------------------------------------|
+| `info`  | GUI start, connection states, each change as its `konectl` command, notes |
+| `warn`  | refused and failed changes, other errors                                  |
+| `debug` | each GUI request, devices opened, requests sent again, read-back retries  |
+| `trace` | every report sent to (`→`) and read from (`←`) the mouse, GUI polling     |
+
+The GUI logs `info` by default, the CLI only warnings. Examples:
+
+```sh
+RUST_LOG=konectl=debug cargo run -p konectl-gui
+RUST_LOG=konectl=trace konectl settings          # the reports of one CLI command
+flatpak run --env=RUST_LOG=konectl=trace io.github.bl4ckspell7.konectl
+```
+
+`konectl` also matches `konectl_gui`; a plain `RUST_LOG=debug` also turns on the debug
+output of every dependency. Started from the desktop, the GUI's output goes to the session
+journal (`journalctl --user -f` on systemd desktops). Logs show device and file paths, but
+no serial numbers; macro keys only appear in the `trace` reports.
+
 ## Packaging
 
 The **Package** workflow (`.github/workflows/package.yml`) runs on pull requests and for

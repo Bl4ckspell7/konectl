@@ -37,6 +37,27 @@ const BACKEND_VAR: &str = "SLINT_BACKEND";
 const SOFTWARE_RENDERER: &str = "winit-software";
 
 fn main() -> ExitCode {
+    // info by default (start, connection, each change and its command,
+    // failures); RUST_LOG=konectl=debug adds the requests, and
+    // RUST_LOG=konectl=trace every report sent to and read from the mouse.
+    // Fatal errors go to stderr directly, whatever RUST_LOG filters.
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("warn,konectl=info"),
+    )
+    .init();
+    log::info!(
+        "konectl-gui {} ({}{})",
+        env!("CARGO_PKG_VERSION"),
+        std::env::var(BACKEND_VAR).map_or_else(
+            |_| "default backend".to_owned(),
+            |backend| format!("{BACKEND_VAR}={backend}")
+        ),
+        if access::in_flatpak() {
+            ", in a Flatpak"
+        } else {
+            ""
+        }
+    );
     #[cfg(feature = "screenshots")]
     if std::env::args_os()
         .nth(1)
@@ -60,7 +81,7 @@ fn main() -> ExitCode {
         // the window fails on its first frame, and the renderer cannot be
         // changed afterwards: start again with the software renderer.
         Err(error) if no_gpu(&error) && std::env::var_os(BACKEND_VAR).is_none() => {
-            eprintln!("konectl-gui: {error}; starting again with the software renderer");
+            log::warn!("{error}; starting again with the software renderer");
             restart_with_software_renderer()
         }
         Err(error) => {

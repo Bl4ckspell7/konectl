@@ -20,6 +20,7 @@ doc = false
 konectl.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+env_logger.workspace = true
 
 [lints]
 workspace = true

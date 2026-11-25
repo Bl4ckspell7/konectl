@@ -32,8 +32,9 @@ modules:
       - install -Dm0644 crates/konectl-gui/data/${FLATPAK_ID}.desktop ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
       - install -Dm0644 crates/konectl-gui/data/${FLATPAK_ID}.metainfo.xml ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.metainfo.xml
       - install -Dm0644 crates/konectl-gui/data/icons/${FLATPAK_ID}.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/${FLATPAK_ID}.svg
+      # The freedesktop SDK has no appstreamcli; flatpak-builder-lint checks the
+      # metadata in CI.
       - desktop-file-validate ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
-      - appstreamcli validate --no-net ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.metainfo.xml
     sources:
       - type: dir
         path: .

@@ -190,6 +190,7 @@ impl Worker {
     /// Writes edits; edits of the same profile are applied together, and the
     /// whole batch is one step to undo.
     pub(super) fn apply_edits(&mut self, edits: &[(u8, Edit)], now: Instant) {
+        log::debug!("edits {edits:?}");
         match self.write_edits(edits) {
             Ok(commands) => self.changed(Done::commands(commands)),
             Err(Failure::Refused(error)) => self.change_refused(error),

@@ -46,11 +46,14 @@ pub fn allow() -> Result<Outcome, String> {
         RuleState::Installed => (udev::apply_script(), None),
         RuleState::Missing | RuleState::Outdated => (udev::install_script(), Some(RULE)),
     };
-    outcome(udev::run(
-        &script,
-        stdin,
-        Elevation::unless_root(Elevation::Pkexec),
-    ))
+    let elevation: Elevation = Elevation::unless_root(Elevation::Pkexec);
+    log::info!("udev rule {state:?}: running {script:?} ({elevation:?})");
+    let outcome = outcome(udev::run(&script, stdin, elevation));
+    // A failure is logged once, where the worker reports it.
+    if let Ok(result) = &outcome {
+        log::info!("udev rule: {result:?}");
+    }
+    outcome
 }
 
 /// What a pkexec run means for the user.

@@ -127,6 +127,7 @@ impl Worker {
             return;
         }
         self.send(Event::Busy(Some("Calibrating the lift-off distance …")));
+        log::info!("lift-off calibration: move the mouse for {LIFT_OFF_CALIBRATION_SECONDS} s");
         let result: konectl::Result<()> = self.run_calibration();
         self.send(Event::Calibration(None));
         self.send(Event::Busy(None));
@@ -241,7 +242,9 @@ impl Worker {
         let paired = self.connector.finish_pairing(dongle, &mut |step| {
             if last != Some(step) {
                 last = Some(step);
-                sink(Event::Pairing(Some(step)));
+                let event = Event::Pairing(Some(step));
+                super::log_event(&event);
+                sink(event);
             }
             if cancel.load(Ordering::SeqCst) {
                 ControlFlow::Break(())
