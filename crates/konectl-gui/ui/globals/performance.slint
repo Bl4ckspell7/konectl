@@ -1,0 +1,42 @@
+// The Performance page, set from Rust (`src/ui/performance.rs`). Controls
+// bind to these properties both ways; Rust sets them again after every change,
+// which also puts them back when a change failed.
+
+export struct StageView {
+    enabled: bool,
+    dpi: int,
+    auto: bool,
+    active: bool,
+    // Counts the edits of this row: after one, the row shows the mouse's
+    // values again even if they did not change (a typed DPI was rounded).
+    edits: int,
+}
+
+export global Performance {
+    in property <[StageView]> stages;
+    // Counts the failed changes: the stage rows then show `stages` again.
+    in property <int> resets;
+
+    out property <[string]> rates: ["125 Hz", "250 Hz", "500 Hz", "1000 Hz"];
+    in-out property <int> rate;
+    out property <[string]> lift-offs: ["Very low", "Low", "Custom (calibrated)"];
+    // -1: a value konectl does not know.
+    in-out property <int> lift-off;
+    in-out property <bool> angle-snapping;
+
+    in-out property <bool> led-timeout;
+    in-out property <int> led-timeout-minutes;
+    out property <[string]> led-timeout-effects: ["Off", "Static", "Breathing", "Heartbeat", "Blinking", "AIMO"];
+    in-out property <int> led-timeout-effect;
+
+    callback set-dpi(int, int);
+    callback set-stage-enabled(int, bool);
+    callback set-dpi-auto(int, bool);
+    callback set-active-stage(int);
+    callback set-rate(int);
+    callback set-lift-off(int);
+    callback set-angle-snapping(bool);
+    // On, minutes, effect index.
+    callback set-led-timeout(bool, int, int);
+    callback set-led-timeout-minutes(int);
+}

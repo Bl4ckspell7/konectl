@@ -36,6 +36,21 @@ SLINT_BACKEND=winit-software cargo run -p konectl-gui  # without OpenGL
 `cargo run -p konectl-gui --features screenshots -- --screenshots DIR` draws the demo
 screens into PPM files without opening a window.
 
+To inspect and drive the running GUI without a window (Slint's embedded MCP server, for
+AI agents and scripted checks):
+
+```sh
+SLINT_EMIT_DEBUG_INFO=1 SLINT_MCP_PORT=8791 SLINT_BACKEND=headless \
+    cargo run -p konectl-gui --features slint/mcp
+```
+
+It serves MCP over HTTP on `127.0.0.1:8791` (`/mcp`): element tree, screenshots, clicks,
+key events. Works on the real mouse too; add `KONECTL_GUI_DEMO=1` for the demo.
+
+With the mouse connected and awake, `cargo test -p konectl-gui -- --ignored
+--test-threads=1` reads it and writes a few changes, then undoes them and checks that the
+mouse is as before.
+
 ## Dependencies
 
 Renovate (`renovate.json`, `.github/workflows/renovate.yml`) runs once a day and opens

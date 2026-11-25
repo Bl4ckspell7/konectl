@@ -31,6 +31,10 @@ pub enum Task {
     /// Check that the dongle or cable is still there, and whether another
     /// program changed the mouse. Sends nothing to the mouse.
     Watch,
+    /// Ask which profile and DPI stage are active: the mouse's own buttons
+    /// change them, and it does not report that by itself. One small query;
+    /// while the mouse sleeps, the dongle answers it alone.
+    Active,
     /// Read battery and signal.
     Status,
 }
@@ -40,6 +44,7 @@ pub const FAILED_INTERVAL: Duration = Duration::from_secs(10);
 pub const NO_ACCESS_INTERVAL: Duration = Duration::from_secs(3);
 pub const WAKE_INTERVAL: Duration = Duration::from_secs(3);
 pub const WATCH_INTERVAL: Duration = Duration::from_secs(2);
+pub const ACTIVE_INTERVAL: Duration = Duration::from_secs(5);
 pub const STATUS_INTERVAL: Duration = Duration::from_secs(30);
 
 /// The tasks of a phase and how often they run.
@@ -51,6 +56,7 @@ fn tasks(phase: Phase) -> &'static [(Task, Duration)] {
         Phase::Asleep => &[(Task::Wake, WAKE_INTERVAL)],
         Phase::Connected => &[
             (Task::Watch, WATCH_INTERVAL),
+            (Task::Active, ACTIVE_INTERVAL),
             (Task::Status, STATUS_INTERVAL),
         ],
     }
@@ -141,6 +147,7 @@ mod tests {
         assert_eq!(schedule.deadline(), Some(start + WATCH_INTERVAL));
 
         let mut watches: u32 = 0;
+        let mut actives: u32 = 0;
         let mut statuses: u32 = 0;
         let mut now: Instant = start;
         while now < start + STATUS_INTERVAL {
@@ -149,12 +156,14 @@ mod tests {
                 schedule.done(task, now);
                 match task {
                     Task::Watch => watches += 1,
+                    Task::Active => actives += 1,
                     Task::Status => statuses += 1,
                     other => panic!("{other:?} while connected"),
                 }
             }
         }
         assert_eq!(watches, 15);
+        assert_eq!(actives, 6);
         assert_eq!(statuses, 1);
     }
 

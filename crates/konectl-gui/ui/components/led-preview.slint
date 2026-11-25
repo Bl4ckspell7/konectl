@@ -1,0 +1,119 @@
+// The mouse seen from above with its two light zones in the left and right
+// buttons, showing the lighting roughly as the mouse does. Drawn here, no
+// product images.
+import { Palette } from "std-widgets.slint";
+
+component Zone inherits Rectangle {
+    in property <color> shown;
+    in property <float> level;
+
+    border-radius: 6px;
+    background: root.shown.with-alpha(max(root.level, 0.04));
+    drop-shadow-blur: 14px * root.level;
+    drop-shadow-color: root.shown.with-alpha(root.level * 0.9);
+}
+
+export component LedPreview {
+    // Index in Lighting.effects: off, static, breathing, heartbeat, wave,
+    // blinking, AIMO, battery.
+    in property <int> effect;
+    in property <color> left;
+    in property <color> right;
+    in property <float> brightness;
+    in property <float> speed;
+    in property <float> left-intensity;
+    in property <float> right-intensity;
+    // 0–1, for the battery effect.
+    in property <float> battery: 0.8;
+    // Animates only while shown.
+    in property <bool> running;
+
+    property <bool> animated: root.running && root.effect >= 2 && root.effect <= 6;
+    property <float> seconds: root.animated ? animation-tick() / 1ms / 1000 : 0;
+    // Seconds per cycle, measured on the mouse with breathing (off, full,
+    // off): about 7 s at speed 1 and 2.8 s at speed 11. The other effects use
+    // the same cycle.
+    property <float> period: 7 - (root.speed - 1) * 0.42;
+    property <float> phase: root.seconds / root.period - floor(root.seconds / root.period);
+    property <float> pulse: root.effect == 0 ? 0
+        : root.effect == 2 ? (1 - cos(root.phase * 360deg)) / 2
+        : root.effect == 3 ? ((root.phase < 0.12 || (root.phase > 0.24 && root.phase < 0.36)) ? 1 : 0.1)
+        : root.effect == 5 ? (root.phase < 0.5 ? 1 : 0)
+        : 1;
+    property <float> level: root.brightness / 100 * root.pulse;
+    property <float> slow-hue: root.seconds * 40 - floor(root.seconds * 40 / 360) * 360;
+
+    function shown(base: color, offset: float) -> color {
+        if root.effect == 4 {
+            return hsv(root.phase * 360 + offset, 1, 1);
+        }
+        if root.effect == 6 {
+            return hsv(root.slow-hue + offset, 0.8, 1);
+        }
+        if root.effect == 7 {
+            return hsv(root.battery * 120, 1, 1);
+        }
+        return base;
+    }
+
+    min-width: 200px;
+    min-height: 250px;
+    accessible-role: image;
+    accessible-label: "Preview of the lighting";
+
+    body := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 140px;
+        height: 220px;
+        border-radius: 64px;
+        background: #26282c;
+        border-width: 2px;
+        border-color: Palette.border;
+
+        // The light zones, in the left and right button.
+        Zone {
+            x: 24px;
+            y: 22px;
+            width: 30px;
+            height: 74px;
+            shown: root.shown(root.left, 0);
+            level: root.level * root.left-intensity / 100;
+        }
+
+        Zone {
+            x: parent.width - 54px;
+            y: 22px;
+            width: 30px;
+            height: 74px;
+            shown: root.shown(root.right, 60);
+            level: root.level * root.right-intensity / 100;
+        }
+
+        // Where the buttons end, the gap between them, and the wheel.
+        Rectangle {
+            x: 10px;
+            y: 104px;
+            width: parent.width - 20px;
+            height: 2px;
+            background: #3a3d42;
+        }
+
+        Rectangle {
+            x: parent.width / 2 - 1px;
+            y: 2px;
+            width: 2px;
+            height: 104px;
+            background: #3a3d42;
+        }
+
+        Rectangle {
+            x: parent.width / 2 - 7px;
+            y: 26px;
+            width: 14px;
+            height: 30px;
+            border-radius: 7px;
+            background: #44474d;
+        }
+    }
+}

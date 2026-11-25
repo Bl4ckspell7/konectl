@@ -1,8 +1,10 @@
 //! Messages between the user interface and the worker.
 
-use konectl::{Backup, ConnectionMode};
+use konectl::{Backup, ConnectionMode, Rgb};
 
 use super::device::{Firmwares, Power};
+use crate::command_line::CommandLines;
+use crate::edit::Edit;
 
 /// What the user interface asks the worker to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,6 +15,23 @@ pub enum Request {
     Retry,
     /// Install the udev rule through pkexec, then connect.
     AllowAccess,
+    /// Change a setting of a profile. Edits that follow quickly are written
+    /// together.
+    Edit {
+        profile: u8,
+        edit: Edit,
+    },
+    ActivateProfile(u8),
+    AddProfile {
+        copy_from: u8,
+    },
+    RemoveProfile(u8),
+    ProfileColour {
+        profile: u8,
+        colour: Option<Rgb>,
+    },
+    /// Go back to the state before the last change.
+    Undo,
     /// Finish the current request and end the worker.
     Shutdown,
 }
@@ -28,6 +47,12 @@ pub enum Event {
     Asleep,
     /// Connected; everything read from the mouse.
     Connected(Box<Snapshot>),
+    /// A change was written.
+    Changed(Box<Change>),
+    /// A change failed; the mouse is as in this snapshot (as far as known).
+    Reverted(Box<Snapshot>),
+    /// Whether there is a change to undo.
+    UndoAvailable(bool),
     /// New battery and signal values.
     Status(Status),
     /// A request is being handled (what is done), or `None` when it is over.
@@ -36,6 +61,18 @@ pub enum Event {
     Error(String),
     /// Another program changed the mouse (it saved a safety backup).
     ChangedElsewhere,
+}
+
+/// A written change.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Change {
+    pub snapshot: Snapshot,
+    /// The same change with the CLI.
+    pub commands: CommandLines,
+    /// What else happened, e.g. profiles that moved.
+    pub note: Option<String>,
+    /// The profile to show next, e.g. one that was just added.
+    pub select: Option<u8>,
 }
 
 /// Everything read from the mouse when it connects or is reloaded.

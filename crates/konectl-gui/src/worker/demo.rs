@@ -8,7 +8,8 @@
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use konectl::{Backup, ConnectionMode};
+use konectl::settings::{PROFILE_COUNT, set_profile_color};
+use konectl::{Backup, ConnectionMode, ProfileBackup, ProfileSettings, RemovedProfile, Rgb};
 
 use super::device::{ConnectError, Connector, Device, Firmwares, Power};
 use crate::access::Outcome;
@@ -47,6 +48,8 @@ pub struct DemoState {
     pub allow_works: bool,
     /// The mouse answers (over the dongle it may sleep).
     pub awake: bool,
+    /// Functions the mouse reported by itself and nobody read yet.
+    pub function_events: usize,
     pub backup: Backup,
     pub energy_saving: bool,
     pub power: Power,
@@ -63,6 +66,7 @@ impl DemoState {
             accessible: true,
             allow_works: true,
             awake: true,
+            function_events: 0,
             backup,
             energy_saving: true,
             power: Power {
@@ -93,6 +97,22 @@ pub fn shared(state: DemoState) -> SharedDemo {
 
 fn lock(state: &SharedDemo) -> MutexGuard<'_, DemoState> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn find(backup: &mut Backup, profile: u8) -> konectl::Result<&mut ProfileBackup> {
+    backup
+        .profiles
+        .iter_mut()
+        .find(|candidate| candidate.settings.profile() == profile)
+        .ok_or(konectl::Error::UnusedProfile(profile))
+}
+
+fn numbers(backup: &Backup) -> Vec<u8> {
+    backup
+        .profiles
+        .iter()
+        .map(|profile| profile.settings.profile())
+        .collect()
 }
 
 pub struct DemoConnector {
@@ -183,6 +203,14 @@ impl Device for DemoDevice {
         self.present(&lock(&self.state))
     }
 
+    fn function_events(&mut self) -> konectl::Result<usize> {
+        let mut state = lock(&self.state);
+        if !self.present(&state) {
+            return Err(konectl::Error::NotFound);
+        }
+        Ok(std::mem::take(&mut state.function_events))
+    }
+
     fn firmwares(&mut self) -> konectl::Result<Firmwares> {
         let state = self.answering("info query")?;
         let mouse = state
@@ -217,6 +245,116 @@ impl Device for DemoDevice {
     fn energy_saving(&mut self) -> konectl::Result<bool> {
         Ok(self.answering("energy saving query")?.energy_saving)
     }
+
+    fn active_sensor(&mut self) -> konectl::Result<konectl::Sensor> {
+        let mut state = self.answering("info query")?;
+        let active: u8 = state.backup.active_profile;
+        Ok(find(&mut state.backup, active)?.settings.sensor)
+    }
+
+    fn settings(&mut self, profile: u8) -> konectl::Result<ProfileSettings> {
+        let mut state = self.answering("info query")?;
+        Ok(find(&mut state.backup, profile)?.settings)
+    }
+
+    fn write_changes(
+        &mut self,
+        before: &ProfileSettings,
+        after: &ProfileSettings,
+    ) -> konectl::Result<bool> {
+        if before.profile() != after.profile() {
+            return Err(konectl::Error::InvalidValue(
+                "the settings belong to another profile".to_owned(),
+            ));
+        }
+        let mut state = self.answering("settings write")?;
+        find(&mut state.backup, after.profile())?.settings = *after;
+        Ok(before != after)
+    }
+
+    fn set_active_profile(&mut self, profile: u8) -> konectl::Result<()> {
+        let mut state = self.answering("profile switch")?;
+        find(&mut state.backup, profile)?;
+        state.backup.active_profile = profile;
+        Ok(())
+    }
+
+    /// Like the mouse: a copy without the colour, in the first free slot.
+    fn add_profile(&mut self, copy_from: u8) -> konectl::Result<u8> {
+        let mut state = self.answering("profile table write")?;
+        let source: ProfileBackup = *find(&mut state.backup, copy_from)?;
+        let used: Vec<u8> = numbers(&state.backup);
+        let number: u8 = (1..=PROFILE_COUNT)
+            .find(|number| !used.contains(number))
+            .ok_or_else(|| {
+                konectl::Error::InvalidValue(format!(
+                    "all {PROFILE_COUNT} profile slots are in use"
+                ))
+            })?;
+        let mut entry = source.entry;
+        set_profile_color(&mut entry, None);
+        state.backup.profiles.push(ProfileBackup {
+            entry,
+            settings: ProfileSettings {
+                sensor: source.settings.sensor.with_profile(number),
+                lighting: source.settings.lighting,
+            },
+            buttons: source.buttons.map(|buttons| buttons.with_profile(number)),
+        });
+        state
+            .backup
+            .profiles
+            .sort_by_key(|profile| profile.settings.profile());
+        Ok(number)
+    }
+
+    /// Like the mouse, but buttons that switch to a profile keep their number.
+    fn remove_profile(&mut self, profile: u8) -> konectl::Result<RemovedProfile> {
+        let mut state = self.answering("profile table write")?;
+        let used: Vec<u8> = numbers(&state.backup);
+        if !used.contains(&profile) {
+            return Err(konectl::Error::UnusedProfile(profile));
+        }
+        if used.len() == 1 || profile == state.backup.active_profile {
+            return Err(konectl::Error::InvalidValue(format!(
+                "profile {profile} cannot be removed"
+            )));
+        }
+        state
+            .backup
+            .profiles
+            .retain(|candidate| candidate.settings.profile() != profile);
+        let mut moved: Vec<(u8, u8)> = Vec::new();
+        for (target, candidate) in (1u8..).zip(state.backup.profiles.iter_mut()) {
+            let source: u8 = candidate.settings.profile();
+            if source != target {
+                moved.push((source, target));
+                candidate.settings.sensor = candidate.settings.sensor.with_profile(target);
+                candidate.buttons = candidate
+                    .buttons
+                    .map(|buttons| buttons.with_profile(target));
+            }
+        }
+        let active: u8 = state.backup.active_profile;
+        if let Some((_, target)) = moved.iter().find(|(source, _)| *source == active) {
+            state.backup.active_profile = *target;
+        }
+        Ok(RemovedProfile {
+            moved,
+            disabled_buttons: 0,
+        })
+    }
+
+    fn set_profile_color(&mut self, profile: u8, colour: Option<Rgb>) -> konectl::Result<()> {
+        let mut state = self.answering("profile table write")?;
+        set_profile_color(&mut find(&mut state.backup, profile)?.entry, colour);
+        Ok(())
+    }
+
+    fn restore(&mut self, backup: &Backup) -> konectl::Result<()> {
+        self.answering("restore")?.backup = backup.clone();
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -247,6 +385,28 @@ mod tests {
         lock(&state).set_plugged_in(true);
         assert!(!first.is_present());
         assert!(connector.connect().expect("plugged in again").is_present());
+    }
+
+    #[test]
+    fn adds_and_removes_profiles_like_the_mouse() {
+        let state: SharedDemo = shared(DemoState::new());
+        let mut device = DemoConnector::new(Arc::clone(&state))
+            .connect()
+            .expect("plugged in");
+        assert_eq!(device.add_profile(1).expect("add"), 4);
+        let added = device.settings(4).expect("profile 4");
+        assert_eq!(
+            added.lighting,
+            device.settings(1).expect("profile 1").lighting
+        );
+
+        device.set_active_profile(3).expect("activate");
+        let removed = device.remove_profile(2).expect("remove");
+        assert_eq!(removed.moved, [(3, 2), (4, 3)]);
+        let backup = device.backup().expect("backup");
+        assert_eq!(numbers(&backup), [1, 2, 3]);
+        assert_eq!(backup.active_profile, 2);
+        assert!(device.remove_profile(2).is_err());
     }
 
     #[test]

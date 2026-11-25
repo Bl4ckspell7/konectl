@@ -11,7 +11,7 @@ use crate::buttons::{ButtonAction, Buttons, Layer};
 use crate::color::Rgb;
 use crate::error::{Error, Result};
 use crate::macros::Macro;
-use crate::protocol::{self, Battery, Report, Signal, Status};
+use crate::protocol::{self, Battery, FunctionEvent, Report, Signal, Status};
 use crate::settings::{
     Effect, Firmware, Info, LiftOff, Lighting, PROFILE_COUNT, ProfileEntry, ProfileSettings,
     Sensor, check_debounce_ms, profile_in_use, profile_index, set_profile_color,
@@ -76,6 +76,9 @@ const DUPLICATE_WAIT_MS: i32 = if cfg!(test) { 0 } else { 100 };
 const MAX_RAW_REPLIES: usize = 64;
 /// Upper bound on stale reports discarded before a request.
 const MAX_STALE_REPORTS: usize = 64;
+/// How long a read-back that differed waits for late answers before it reads
+/// again.
+const LATE_ANSWER_WAIT_MS: i32 = 50;
 
 /// How the mouse is connected to the computer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -561,6 +564,21 @@ impl<T: Transport> KoneProAir<T> {
         self.discard_pending(0).is_ok()
     }
 
+    /// The functions the mouse reported by itself since the last call, e.g.
+    /// when its profile button switched profiles. Sends nothing; other queued
+    /// reports are dropped (reports read while waiting for an answer are not
+    /// kept). Fails once the device is gone.
+    pub fn take_function_events(&mut self) -> Result<Vec<FunctionEvent>> {
+        let mut events: Vec<FunctionEvent> = Vec::new();
+        for _ in 0..MAX_STALE_REPORTS {
+            match self.transport.read_report(0)? {
+                Some(report) => events.extend(protocol::parse_function_event(&report)),
+                None => break,
+            }
+        }
+        Ok(events)
+    }
+
     /// Makes `profile` (1–5) the active profile.
     pub fn set_active_profile(&mut self, profile: u8) -> Result<()> {
         self.profile_entry(profile)?;
@@ -994,7 +1012,31 @@ impl<T: Transport> KoneProAir<T> {
             }
         }
 
-        // Read back exactly the blocks that were written.
+        // The dongle sometimes delivers an answer twice, and a late copy of
+        // an earlier read can stand in for the read-back: on a difference,
+        // let late answers arrive, drop them and read once more.
+        if self
+            .read_back(profile, sensor, lighting, buttons)?
+            .is_none()
+        {
+            return Ok(());
+        }
+        self.discard_pending(LATE_ANSWER_WAIT_MS)?;
+        match self.read_back(profile, sensor, lighting, buttons)? {
+            None => Ok(()),
+            Some(what) => Err(Error::VerifyFailed(what)),
+        }
+    }
+
+    /// Reads back exactly the blocks that were written; the name of the
+    /// first one that differs, if any.
+    fn read_back(
+        &mut self,
+        profile: u8,
+        sensor: &Sensor,
+        lighting: Option<&Lighting>,
+        buttons: Option<&Buttons>,
+    ) -> Result<Option<&'static str>> {
         let (stored_sensor, stored_lighting, stored_buttons) =
             self.read_profile(Some(profile), |mouse, target| {
                 let sensor: Sensor = mouse.read_selected_sensor(target)?;
@@ -1007,7 +1049,7 @@ impl<T: Transport> KoneProAir<T> {
                 Ok((sensor, lighting, buttons))
             })?;
         if stored_sensor.bytes() != sensor.write_bytes() {
-            return Err(Error::VerifyFailed("sensor settings"));
+            return Ok(Some("sensor settings"));
         }
         if let (Some(lighting), Some(stored)) = (lighting, stored_lighting) {
             // With the AIMO effect the mouse reports what it currently shows
@@ -1018,15 +1060,15 @@ impl<T: Transport> KoneProAir<T> {
                 stored == *lighting
             };
             if !lighting_stored {
-                return Err(Error::VerifyFailed("lighting settings"));
+                return Ok(Some("lighting settings"));
             }
         }
         if let (Some(buttons), Some(stored)) = (buttons, stored_buttons)
             && stored != *buttons
         {
-            return Err(Error::VerifyFailed("buttons"));
+            return Ok(Some("buttons"));
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Sends an arbitrary report and returns every reply that follows, until
@@ -1231,6 +1273,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn takes_the_functions_the_mouse_reported() {
+        // Captured: Easy-Shift held (slot 5), then the profile-previous
+        // function; a stale battery answer in between is dropped.
+        let mut mouse = KoneProAir {
+            transport: MockTransport::new(Vec::new()),
+            mode: ConnectionMode::Wireless,
+        };
+        mouse.transport.pending.extend([
+            report_with_prefix(&[0x90, 0x07, 0x04, 0x00, 0x45, 0x00, 0x00, 0x05]),
+            battery_reply(80),
+            report_with_prefix(&[0x90, 0x07, 0x04, 0x00, 0x47, 0x00, 0x00, 0x06]),
+        ]);
+        let events: Vec<FunctionEvent> = mouse.take_function_events().expect("events");
+        assert_eq!(
+            events,
+            [
+                FunctionEvent {
+                    code: 0x45,
+                    entry: [0, 0],
+                    slot: 5
+                },
+                FunctionEvent {
+                    code: 0x47,
+                    entry: [0, 0],
+                    slot: 6
+                },
+            ]
+        );
+        assert!(mouse.take_function_events().expect("none").is_empty());
+    }
+
     fn init_reply() -> Report {
         report_with_prefix(&[0x90, 0x00, 0x03, 0x00, 0xec, 0xfa, 0x03])
     }
@@ -1349,13 +1423,33 @@ mod tests {
         ));
     }
 
+    /// The read-back part of [`write_batches`]: what the mouse reports.
+    fn read_back_batches(stored: &ProfileSettings) -> Vec<Vec<Report>> {
+        write_batches(stored).split_off(4)
+    }
+
     #[test]
     fn write_that_does_not_read_back_fails() {
-        let mut mouse = connect(write_batches(&start_settings()));
+        // Read back twice: the second read shows the same.
+        let mut batches = write_batches(&start_settings());
+        batches.extend(read_back_batches(&start_settings()));
+        let mut mouse = connect(batches);
         assert!(matches!(
             mouse.write_settings(&changed_settings()),
             Err(Error::VerifyFailed("sensor settings"))
         ));
+    }
+
+    #[test]
+    fn a_late_copy_of_an_earlier_answer_is_read_again() {
+        // The first read-back gets an old lighting answer; the second the
+        // written one.
+        let mut stale = changed_settings();
+        stale.lighting = start_settings().lighting;
+        let mut batches = write_batches(&stale);
+        batches.extend(read_back_batches(&changed_settings()));
+        let mut mouse = connect(batches);
+        mouse.write_settings(&changed_settings()).expect("verified");
     }
 
     #[test]
@@ -1647,7 +1741,11 @@ mod tests {
         buttons
             .set_action(7, Layer::Standard, ButtonAction::Disabled)
             .expect("allowed");
-        let mut mouse = connect(write_button_batches(&start_buttons()));
+        // Read back twice: the second read shows the same.
+        let mut batches = write_button_batches(&start_buttons());
+        let read_back: Vec<Vec<Report>> = batches[batches.len() - 5..].to_vec();
+        batches.extend(read_back);
+        let mut mouse = connect(batches);
         assert!(matches!(
             mouse.write_buttons(&buttons),
             Err(Error::VerifyFailed("buttons"))

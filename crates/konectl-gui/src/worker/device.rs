@@ -8,7 +8,10 @@ use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 
-use konectl::{Backup, ConnectionMode, Firmware, HidTransport, KoneProAir, Manager};
+use konectl::{
+    Backup, ConnectionMode, Firmware, HidTransport, KoneProAir, Manager, ProfileSettings,
+    RemovedProfile, Rgb, Sensor,
+};
 
 use crate::access::{self, Outcome};
 
@@ -35,6 +38,10 @@ pub trait Device {
     fn mode(&self) -> ConnectionMode;
     /// `false` once the dongle or cable was unplugged. Sends nothing.
     fn is_present(&mut self) -> bool;
+    /// How many functions the mouse reported by itself since the last call
+    /// (e.g. its profile button switched profiles). Sends nothing; fails
+    /// once the dongle or cable was unplugged.
+    fn function_events(&mut self) -> konectl::Result<usize>;
     /// Fails with [`konectl::Error::NotReachable`] while the mouse sleeps.
     fn firmwares(&mut self) -> konectl::Result<Firmwares>;
     fn power(&mut self) -> konectl::Result<Power>;
@@ -43,6 +50,26 @@ pub trait Device {
     /// All profiles in use.
     fn backup(&mut self) -> konectl::Result<Backup>;
     fn energy_saving(&mut self) -> konectl::Result<bool>;
+
+    /// Block 0 of the active profile (one query): which profile is active,
+    /// and its active DPI stage.
+    fn active_sensor(&mut self) -> konectl::Result<Sensor>;
+    /// The settings of `profile`, read from the mouse.
+    fn settings(&mut self, profile: u8) -> konectl::Result<ProfileSettings>;
+    /// Writes what changed from `before` to `after` (one profile); `false`
+    /// when nothing did.
+    fn write_changes(
+        &mut self,
+        before: &ProfileSettings,
+        after: &ProfileSettings,
+    ) -> konectl::Result<bool>;
+    fn set_active_profile(&mut self, profile: u8) -> konectl::Result<()>;
+    /// Adds a copy of `copy_from` and returns its number.
+    fn add_profile(&mut self, copy_from: u8) -> konectl::Result<u8>;
+    fn remove_profile(&mut self, profile: u8) -> konectl::Result<RemovedProfile>;
+    fn set_profile_color(&mut self, profile: u8, colour: Option<Rgb>) -> konectl::Result<()>;
+    /// Writes a whole state back (profiles, settings, buttons, active profile).
+    fn restore(&mut self, backup: &Backup) -> konectl::Result<()>;
 }
 
 /// Why no mouse could be opened.
@@ -74,6 +101,10 @@ impl Device for KoneProAir<HidTransport> {
 
     fn is_present(&mut self) -> bool {
         KoneProAir::is_present(self)
+    }
+
+    fn function_events(&mut self) -> konectl::Result<usize> {
+        Ok(self.take_function_events()?.len())
     }
 
     fn firmwares(&mut self) -> konectl::Result<Firmwares> {
@@ -109,6 +140,42 @@ impl Device for KoneProAir<HidTransport> {
 
     fn energy_saving(&mut self) -> konectl::Result<bool> {
         KoneProAir::energy_saving(self)
+    }
+
+    fn active_sensor(&mut self) -> konectl::Result<Sensor> {
+        Ok(self.info()?.sensor)
+    }
+
+    fn settings(&mut self, profile: u8) -> konectl::Result<ProfileSettings> {
+        KoneProAir::settings(self, Some(profile))
+    }
+
+    fn write_changes(
+        &mut self,
+        before: &ProfileSettings,
+        after: &ProfileSettings,
+    ) -> konectl::Result<bool> {
+        KoneProAir::write_changes(self, before, after)
+    }
+
+    fn set_active_profile(&mut self, profile: u8) -> konectl::Result<()> {
+        KoneProAir::set_active_profile(self, profile)
+    }
+
+    fn add_profile(&mut self, copy_from: u8) -> konectl::Result<u8> {
+        KoneProAir::add_profile(self, copy_from)
+    }
+
+    fn remove_profile(&mut self, profile: u8) -> konectl::Result<RemovedProfile> {
+        KoneProAir::remove_profile(self, profile)
+    }
+
+    fn set_profile_color(&mut self, profile: u8, colour: Option<Rgb>) -> konectl::Result<()> {
+        KoneProAir::set_profile_color(self, profile, colour)
+    }
+
+    fn restore(&mut self, backup: &Backup) -> konectl::Result<()> {
+        KoneProAir::restore(self, backup)
     }
 }
 

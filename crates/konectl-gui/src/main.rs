@@ -6,9 +6,12 @@
 
 mod access;
 mod backend;
+mod command_line;
+mod edit;
 #[cfg(feature = "screenshots")]
 mod screenshots;
 mod ui;
+mod undo;
 mod view;
 mod worker;
 
