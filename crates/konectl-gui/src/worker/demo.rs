@@ -6,19 +6,30 @@
 //! `KONECTL_GUI_DEMO=no-access`, `asleep` or `unplugged` start the demo in
 //! that state, to show those screens.
 
+use std::any::Any;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread;
+use std::time::Duration;
 
+use konectl::pairing::PairingStep;
 use konectl::settings::{PROFILE_COUNT, set_profile_color};
 use konectl::{
-    Backup, ButtonAction, Buttons, ConnectionMode, Layer, Macro, ProfileBackup, ProfileSettings,
-    RemovedProfile, Rgb,
+    Backup, ButtonAction, Buttons, ConnectionMode, Layer, LiftOff, Macro, ProfileBackup,
+    ProfileSettings, RemovedProfile, Rgb,
 };
 
-use super::device::{ConnectError, Connector, Device, Firmwares, Power};
+use super::device::{ConnectError, Connector, Device, Firmwares, OnPairingStep, Power};
 use crate::access::Outcome;
 
 /// Set to `1` (or a start state) to start in demo mode.
 pub const DEMO_VAR: &str = "KONECTL_GUI_DEMO";
+
+/// How long the demo shows each pairing step.
+const PAIRING_STEP: Duration = if cfg!(test) {
+    Duration::ZERO
+} else {
+    Duration::from_millis(1500)
+};
 
 const FIXTURE: &str = include_str!("../../fixtures/demo-backup.txt");
 
@@ -57,6 +68,13 @@ pub struct DemoState {
     pub energy_saving: bool,
     pub power: Power,
     pub signal: u8,
+    /// The dongle waits for the mouse to pair.
+    pub pairing: bool,
+    /// Finished pairings and lift-off calibrations.
+    pub pairings: u32,
+    pub calibrations: u32,
+    /// A calibration was started and not finished yet.
+    pub calibrating: bool,
 }
 
 impl DemoState {
@@ -78,11 +96,14 @@ impl DemoState {
                 cable_power: false,
             },
             signal: 92,
+            pairing: false,
+            pairings: 0,
+            calibrations: 0,
+            calibrating: false,
         }
     }
 
     /// Unplugs (`false`) or plugs in (`true`) the dongle.
-    #[cfg(test)]
     pub fn set_plugged_in(&mut self, plugged_in: bool) {
         if self.plugged_in && !plugged_in {
             self.plugs += 1;
@@ -158,6 +179,49 @@ impl Connector for DemoConnector {
             state.accessible = true;
         }
         Ok(Outcome::Allowed)
+    }
+
+    /// Goes through the steps by itself, a moment each, as if the dongle was
+    /// unplugged and plugged in again.
+    fn finish_pairing(
+        &mut self,
+        dongle: Box<dyn Device>,
+        on_step: &mut OnPairingStep<'_>,
+    ) -> konectl::Result<Box<dyn Device>> {
+        let dongle: Box<DemoDevice> = dongle
+            .into_any()
+            .downcast()
+            .map_err(|_| konectl::Error::InvalidValue("not a demo mouse".to_owned()))?;
+        if dongle.mode != ConnectionMode::Wireless || !lock(&self.state).pairing {
+            return Err(konectl::Error::InvalidValue(
+                "the dongle is not in pairing mode".to_owned(),
+            ));
+        }
+        drop(dongle);
+        for step in [
+            PairingStep::Unplug,
+            PairingStep::Replug,
+            PairingStep::Connect,
+        ] {
+            if on_step(step).is_break() {
+                return Err(konectl::Error::Cancelled);
+            }
+            thread::sleep(PAIRING_STEP);
+            if step == PairingStep::Unplug {
+                lock(&self.state).set_plugged_in(false);
+                lock(&self.state).set_plugged_in(true);
+            }
+        }
+        let mut state = lock(&self.state);
+        state.pairing = false;
+        state.pairings += 1;
+        // Paired, the mouse answers through the dongle.
+        state.awake = true;
+        Ok(Box::new(DemoDevice {
+            state: Arc::clone(&self.state),
+            mode: ConnectionMode::Wireless,
+            plugs: state.plugs,
+        }))
     }
 }
 
@@ -386,6 +450,104 @@ impl Device for DemoDevice {
             )));
         }
         self.write_buttons(buttons)
+    }
+
+    fn set_energy_saving(&mut self, enabled: bool) -> konectl::Result<()> {
+        self.answering("energy saving write")?.energy_saving = enabled;
+        Ok(())
+    }
+
+    fn set_debounce(&mut self, ms: u8) -> konectl::Result<()> {
+        let mut state = self.answering("settings write")?;
+        for profile in &mut state.backup.profiles {
+            profile.settings.sensor.set_debounce_ms(ms)?;
+        }
+        Ok(())
+    }
+
+    fn start_lift_off_calibration(&mut self) -> konectl::Result<()> {
+        self.answering("lift-off calibration query")?.calibrating = true;
+        Ok(())
+    }
+
+    fn finish_lift_off_calibration(&mut self) -> konectl::Result<()> {
+        let mut state = self.answering("lift-off calibration")?;
+        if !std::mem::take(&mut state.calibrating) {
+            return Err(konectl::Error::InvalidValue(
+                "no calibration was started".to_owned(),
+            ));
+        }
+        state.calibrations += 1;
+        Ok(())
+    }
+
+    fn set_lift_off_all(&mut self, lift_off: LiftOff) -> konectl::Result<()> {
+        let mut state = self.answering("settings write")?;
+        for profile in &mut state.backup.profiles {
+            profile.settings.sensor.set_lift_off(lift_off)?;
+        }
+        Ok(())
+    }
+
+    /// The demo goes back to how it started; the profiles stay (as on the
+    /// mouse, which keeps the number of profiles).
+    fn reset(&mut self) -> konectl::Result<()> {
+        let mut state = self.answering("reset")?;
+        let fresh: Backup = DemoState::new().backup;
+        let profiles: Vec<ProfileBackup> = state
+            .backup
+            .profiles
+            .iter()
+            .map(|profile| {
+                let number: u8 = profile.settings.profile();
+                let default: &ProfileBackup = &fresh.profiles[0];
+                ProfileBackup {
+                    entry: default.entry,
+                    settings: ProfileSettings {
+                        sensor: default.settings.sensor.with_profile(number),
+                        lighting: default.settings.lighting,
+                    },
+                    buttons: default.buttons.map(|buttons| buttons.with_profile(number)),
+                }
+            })
+            .collect();
+        state.backup.profiles = profiles;
+        state.energy_saving = true;
+        Ok(())
+    }
+
+    fn start_pairing(&mut self) -> konectl::Result<()> {
+        if self.mode != ConnectionMode::Wireless {
+            return Err(konectl::Error::InvalidValue(
+                "pairing works through the dongle, not over the USB cable".to_owned(),
+            ));
+        }
+        // The dongle answers even while the mouse sleeps.
+        let mut state = lock(&self.state);
+        if !self.present(&state) {
+            return Err(konectl::Error::NotFound);
+        }
+        state.pairing = true;
+        Ok(())
+    }
+
+    fn check_backup(&mut self, backup: &Backup) -> konectl::Result<()> {
+        let _state = self.answering("info query")?;
+        if !backup
+            .profiles
+            .iter()
+            .any(|profile| profile.settings.profile() == backup.active_profile)
+        {
+            return Err(konectl::Error::InvalidBackup(format!(
+                "its active profile {} is not in it",
+                backup.active_profile
+            )));
+        }
+        Ok(())
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
     }
 }
 

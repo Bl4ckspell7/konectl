@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod buttons;
+pub mod device;
 pub mod lighting;
 pub mod performance;
 pub mod profiles;

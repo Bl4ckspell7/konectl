@@ -2,6 +2,8 @@
 //! the command bar. Every line names the profile (`-p N`), so it does the same
 //! whichever profile is active.
 
+use std::path::Path;
+
 use konectl::buttons::BUTTON_COUNT;
 use konectl::settings::{DPI_STAGE_COUNT, profile_color};
 use konectl::{
@@ -275,6 +277,41 @@ pub fn remove_profile(profile: u8) -> CommandLines {
 pub fn profile_colour(profile: u8, colour: Option<Rgb>) -> CommandLines {
     let colour: String = colour.map_or_else(|| "none".to_owned(), hex);
     one(format!("konectl profile color {profile} {colour}"))
+}
+
+pub fn energy_saving(enabled: bool) -> CommandLines {
+    one(format!("konectl energy-saving {}", switch(enabled)))
+}
+
+/// The debounce time is set in every profile, so the line names none.
+pub fn debounce(ms: u8) -> CommandLines {
+    one(format!("konectl debounce {ms}"))
+}
+
+pub fn calibrate_lift_off() -> CommandLines {
+    one("konectl liftoff calibrate".to_owned())
+}
+
+pub fn reset() -> CommandLines {
+    one("konectl reset".to_owned())
+}
+
+pub fn pair() -> CommandLines {
+    one("konectl pair".to_owned())
+}
+
+pub fn save_backup(path: &Path) -> CommandLines {
+    one(format!(
+        "konectl backup {}",
+        shell_quote(&path.to_string_lossy())
+    ))
+}
+
+pub fn restore(path: &Path) -> CommandLines {
+    one(format!(
+        "konectl restore {}",
+        shell_quote(&path.to_string_lossy())
+    ))
 }
 
 fn one(line: String) -> CommandLines {

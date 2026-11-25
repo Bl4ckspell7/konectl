@@ -18,6 +18,8 @@ cd "$REPO_ROOT"
 
 CARGO_TOML="Cargo.toml"
 CARGO_LOCK="Cargo.lock"
+# AppStream metadata of the GUI: lists the releases with their dates.
+METAINFO="crates/konectl-gui/data/io.github.bl4ckspell7.konectl.metainfo.xml"
 RELEASE_NOTES="${RELEASE_NOTES:-/tmp/release-notes.md}"
 # Workspace packages; all share the version from [workspace.package].
 CRATES=("konectl" "konectl-cli" "konectl-gui")
@@ -97,6 +99,11 @@ apply() {
         sed -i '/^name = "'"$crate"'"$/{n;s/^version = "[^"]*"/version = "'"$v"'"/}' "$CARGO_LOCK"
     done
 
+    # AppStream metadata: the new release first, dated today (UTC).
+    if ! grep -q "<release version=\"$v\"" "$METAINFO"; then
+        sed -i 's|^  <releases>$|&\n    <release version="'"$v"'" date="'"$(date -u +%F)"'"/>|' "$METAINFO"
+    fi
+
     check_applied "$v"
 
     # Changelog + this release's notes (Conventional Commits via git-cliff).
@@ -119,6 +126,7 @@ check_applied() {
         [[ "$(grep -A1 -x 'name = "'"$crate"'"' "$CARGO_LOCK")" == *$'\n'"version = \"$v\"" ]] ||
             die "$CARGO_LOCK: $crate version not updated"
     done
+    grep -q "<release version=\"$v\"" "$METAINFO" || die "$METAINFO: release $v not added"
 }
 
 case "${1:-}" in

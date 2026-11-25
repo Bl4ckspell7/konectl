@@ -55,25 +55,33 @@ pub(super) fn collect_edits(
     }
 }
 
-/// How long a button function waits for another one for the same button
-/// (stepping through a list with the arrow keys chooses each function).
-const BUTTON_SETTLE: Duration = Duration::from_millis(400);
+/// How long a request waits for a newer one of its kind (stepping through a
+/// list or a spin box with the arrow keys chooses each value).
+const STEP_SETTLE: Duration = Duration::from_millis(400);
 
-/// The last of the button functions chosen in quick succession for the same
-/// button and layer, starting with `first`.
-pub(super) fn latest_button(first: Request, requests: &Receiver<Request>) -> (Request, Following) {
+/// What a newer request replaces.
+#[derive(PartialEq, Eq)]
+enum Target {
+    Button(u8, u8, Layer),
+    Debounce,
+}
+
+/// The last of the requests of one kind made in quick succession, starting
+/// with `first`: a button's function, or the debounce time.
+pub(super) fn latest_of_kind(first: Request, requests: &Receiver<Request>) -> (Request, Following) {
     let target = |request: &Request| match request {
         Request::SetButton {
             profile,
             button,
             layer,
             ..
-        } => Some((*profile, *button, *layer)),
+        } => Some(Target::Button(*profile, *button, *layer)),
+        Request::Debounce(_) => Some(Target::Debounce),
         _ => None,
     };
     let mut latest: Request = first;
     loop {
-        match requests.recv_timeout(BUTTON_SETTLE) {
+        match requests.recv_timeout(STEP_SETTLE) {
             Ok(next) if target(&next).is_some() && target(&next) == target(&latest) => {
                 latest = next
             }
@@ -103,14 +111,14 @@ pub(super) fn skip_repeats(handled: &Request, requests: &Receiver<Request>) -> F
 }
 
 /// What a change reports.
-struct Done {
-    commands: CommandLines,
-    note: Option<String>,
-    select: Option<u8>,
+pub(super) struct Done {
+    pub(super) commands: CommandLines,
+    pub(super) note: Option<String>,
+    pub(super) select: Option<u8>,
 }
 
 impl Done {
-    fn commands(commands: CommandLines) -> Self {
+    pub(super) fn commands(commands: CommandLines) -> Self {
         Self {
             commands,
             note: None,
@@ -516,7 +524,7 @@ impl Worker {
     }
 
     /// Saves the state first, then runs `write` on the mouse and the snapshot.
-    fn profile_change(
+    pub(super) fn profile_change(
         &mut self,
         now: Instant,
         write: impl FnOnce(&mut dyn Device, &mut Backup) -> konectl::Result<Done>,
@@ -539,7 +547,7 @@ impl Worker {
 
     /// Saves the safety backups of the current state, and remembers it for
     /// undo if `undoable`.
-    fn save_state(&mut self, undoable: bool) -> konectl::Result<()> {
+    pub(super) fn save_state(&mut self, undoable: bool) -> konectl::Result<()> {
         let Some(snapshot) = &self.snapshot else {
             return Ok(());
         };
@@ -554,7 +562,7 @@ impl Worker {
         Ok(())
     }
 
-    fn changed(&mut self, done: Done) {
+    pub(super) fn changed(&mut self, done: Done) {
         if let Some(snapshot) = self.snapshot.clone() {
             self.send(Event::Changed(Box::new(Change {
                 snapshot,
@@ -567,7 +575,7 @@ impl Worker {
     }
 
     /// A change was refused before anything was written.
-    fn change_refused(&mut self, error: konectl::Error) {
+    pub(super) fn change_refused(&mut self, error: konectl::Error) {
         self.send(Event::Error(format!("Not changed: {error}")));
         if let Some(snapshot) = self.snapshot.clone() {
             self.send(Event::Reverted(Box::new(snapshot)));
@@ -578,7 +586,7 @@ impl Worker {
     /// read again and the controls show what it has. Its undo entry (`pushed`)
     /// is dropped; the safety backup still has the state before. A mouse
     /// that sleeps or is gone is handled like when polling notices it.
-    fn change_failed(&mut self, error: konectl::Error, pushed: bool, now: Instant) {
+    pub(super) fn change_failed(&mut self, error: konectl::Error, pushed: bool, now: Instant) {
         self.send(Event::Error(format!("The change failed: {error}")));
         if pushed {
             self.undo.pop();
@@ -680,9 +688,21 @@ mod tests {
         sender.send(choose("volume-up", 7)).expect("send");
         sender.send(choose("volume-down", 7)).expect("send");
         sender.send(choose("back", 6)).expect("send");
-        let (latest, following) = latest_button(choose("mute", 7), &receiver);
+        let (latest, following) = latest_of_kind(choose("mute", 7), &receiver);
         assert_eq!(latest, choose("volume-down", 7));
         assert_eq!(following, Following::Next(choose("back", 6)));
+    }
+
+    #[test]
+    fn quick_debounce_steps_write_the_last() {
+        let (sender, receiver) = mpsc::channel();
+        for ms in [3, 4, 5] {
+            sender.send(Request::Debounce(ms)).expect("send");
+        }
+        sender.send(Request::Reload).expect("send");
+        let (latest, following) = latest_of_kind(Request::Debounce(2), &receiver);
+        assert_eq!(latest, Request::Debounce(5));
+        assert_eq!(following, Following::Next(Request::Reload));
     }
 
     #[test]

@@ -1,8 +1,10 @@
 // Shown instead of the pages while no mouse can be used: none found, reading
-// it failed, or it sleeps before it was ever read.
+// it failed, or it sleeps before it was ever read. A mouse that does not
+// answer through the dongle may not be paired with it: pairing starts here.
 import { Button, Spinner } from "std-widgets.slint";
 import { AppState, MouseState } from "../globals/app-state.slint";
 import { Theme } from "../globals/theme.slint";
+import { PairingDialog } from "../components/pairing-dialog.slint";
 
 export component StatePage {
     property <bool> asleep: AppState.state == MouseState.asleep;
@@ -41,7 +43,7 @@ export component StatePage {
 
                 Text {
                     text: root.asleep
-                        ? "Move it, or switch it on. konectl connects as soon as it answers."
+                        ? "Move it, or switch it on. konectl connects as soon as it answers. A new mouse or dongle has to be paired first."
                         : root.failed ? AppState.problem
                         : "Connect the wireless dongle or the USB cable of your ROCCAT Kone Pro Air.";
                     wrap: word-wrap;
@@ -51,6 +53,7 @@ export component StatePage {
 
                 if root.asleep || root.failed: HorizontalLayout {
                     alignment: center;
+                    spacing: Theme.spacing;
 
                     Button {
                         text: "Try again";
@@ -59,8 +62,21 @@ export component StatePage {
                             AppState.retry();
                         }
                     }
+
+                    // Only the dongle answers while the mouse does not.
+                    if root.asleep: Button {
+                        text: "Pair …";
+                        enabled: !AppState.busy;
+                        clicked => {
+                            pairing.open();
+                        }
+                    }
                 }
             }
         }
+    }
+
+    pairing := PairingDialog {
+        available: root.asleep && !AppState.busy;
     }
 }

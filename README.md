@@ -1,6 +1,7 @@
 # konectl
 
-Unofficial Linux tool and Rust library to configure the **ROCCAT Kone Pro Air** mouse.
+Unofficial Linux tool, desktop app and Rust library to configure the **ROCCAT Kone Pro
+Air** mouse.
 Not affiliated with ROCCAT or Turtle Beach.
 
 ROCCAT's configuration software (Swarm) only runs on Windows, and existing Linux
@@ -30,13 +31,30 @@ and the USB cable. See
 [docs/protocol.md](docs/protocol.md) for the protocol and
 [docs/reverse-engineering.md](docs/reverse-engineering.md) for how it was worked out.
 
+## Desktop app
+
+![The Performance page of konectl-gui](docs/screenshots/performance.png)
+
+`konectl-gui` does what the command-line tool does, in a window: DPI stages and
+sensor settings, lighting with a live preview, button functions and macros on a
+drawing of the mouse, profiles, pairing, backups and the factory reset. Changes
+are written to the mouse right away and can be undone, and the app shows the
+matching `konectl` command for each one. If the mouse cannot be opened, it offers
+to install the udev rule (see [Permissions](#permissions)).
+
+More pages: [Lighting](docs/screenshots/lighting.png),
+[Buttons](docs/screenshots/buttons.png), [Device](docs/screenshots/device.png).
+
 ## Layout
 
 - `crates/konectl`: the library (`Manager`, `KoneProAir`, `settings`, `protocol`)
 - `crates/konectl-cli`: the `konectl` command-line tool
+- `crates/konectl-gui`: the `konectl-gui` desktop app (Slint)
 - `tools/re`: Windows VM and USB capture scripts used to decode the protocol
 
 ## Install
+
+### Command-line tool
 
 Building needs Rust 1.88 or newer, a C compiler, `pkg-config` and the libudev
 development files: `gcc`, `pkgconf` and `systemd-libs` on Arch;
@@ -50,6 +68,37 @@ cargo install --path crates/konectl-cli   # or from a clone of this repository
 
 To use the library in your own project: `cargo add konectl`
 ([API documentation](https://docs.rs/konectl)).
+
+### Desktop app
+
+Each [release](https://github.com/Bl4ckspell7/konectl/releases) has:
+
+- `konectl-VERSION-x86_64-linux.tar.gz`: both programs, the desktop file and the
+  icon, for distributions with glibc 2.36 or newer. Unpack it into `~/.local`:
+
+  ```sh
+  tar -xzf konectl-VERSION-x86_64-linux.tar.gz
+  cp -r konectl-VERSION-x86_64-linux/bin konectl-VERSION-x86_64-linux/share ~/.local/
+  ```
+
+- `konectl-VERSION.flatpak`: the desktop app as a Flatpak bundle (its runtime
+  comes from Flathub):
+
+  ```sh
+  flatpak install --user konectl-VERSION.flatpak
+  ```
+
+  A Flatpak cannot install the udev rule: the app shows the commands to run
+  instead. It keeps its safety backups in its own directory
+  (`~/.var/app/io.github.bl4ckspell7.konectl`), apart from the CLI's.
+
+From crates.io, with Rust 1.95 or newer: besides the build dependencies of the
+CLI, the GUI needs the fontconfig development files (`fontconfig` on Arch,
+`libfontconfig-dev` on Debian and Ubuntu, `fontconfig-devel` on Fedora).
+
+```sh
+cargo install konectl-gui
+```
 
 ## Permissions
 

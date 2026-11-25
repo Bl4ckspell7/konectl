@@ -28,6 +28,9 @@ use std::process::{Command, ExitCode};
 use generated::AppWindow;
 use slint::ComponentHandle as _;
 
+/// The application ID: Wayland app ID, desktop file, icon and Flatpak.
+const APP_ID: &str = "io.github.bl4ckspell7.konectl";
+
 /// The environment variable that selects Slint's backend and renderer, and the
 /// value for the renderer that needs no GPU.
 const BACKEND_VAR: &str = "SLINT_BACKEND";
@@ -69,6 +72,8 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), slint::PlatformError> {
     let window = AppWindow::new()?;
+    // Matches the desktop file (data/), so the desktop shows its name and icon.
+    slint::set_xdg_app_id(APP_ID)?;
     let worker = backend::start(&window)
         .map_err(|error| slint::PlatformError::Other(format!("could not start: {error}")))?;
     let result = window.run();

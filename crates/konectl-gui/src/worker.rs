@@ -8,9 +8,12 @@
 mod change;
 pub mod demo;
 pub mod device;
+mod maintenance;
 mod request;
 pub mod schedule;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Instant, SystemTime};
@@ -21,7 +24,7 @@ use konectl::{ConnectionMode, Sensor};
 use crate::access::Outcome;
 use crate::command_line::CommandLines;
 use crate::undo::UndoStack;
-use change::{Following, collect_edits, latest_button, skip_repeats};
+use change::{Following, collect_edits, latest_of_kind, skip_repeats};
 use device::{ConnectError, Connector, Device};
 pub use request::{Change, Event, Request, Snapshot, Status};
 use schedule::{Phase, Schedule, Task};
@@ -61,6 +64,9 @@ pub struct Worker {
     reported: Option<Event>,
     /// The udev rule was just installed: if there is still no access, say so.
     access_allowed: bool,
+    /// Set by the user interface to stop waiting (pairing); shared with
+    /// [`Requests`], since the worker does not read requests meanwhile.
+    cancel: Arc<AtomicBool>,
     sink: Sink,
 }
 
@@ -82,6 +88,7 @@ impl Worker {
             changed_elsewhere: false,
             reported: None,
             access_allowed: false,
+            cancel: Arc::default(),
             sink,
         }
     }
@@ -106,8 +113,8 @@ impl Worker {
                     self.apply_edits(&edits, Instant::now());
                     following
                 }
-                Ok(request @ Request::SetButton { .. }) => {
-                    let (latest, following) = latest_button(request, requests);
+                Ok(request @ (Request::SetButton { .. } | Request::Debounce(_))) => {
+                    let (latest, following) = latest_of_kind(request, requests);
                     self.handle(latest, Instant::now());
                     following
                 }
@@ -181,6 +188,14 @@ impl Worker {
                 mode,
             } => self.set_macro(profile, button, layer, &keys, mode, now),
             Request::Undo => self.undo(now),
+            Request::EnergySaving(enabled) => self.set_energy_saving(enabled, now),
+            Request::Debounce(ms) => self.set_debounce(ms, now),
+            Request::CalibrateLiftOff => self.calibrate_lift_off(now),
+            Request::Reset => self.reset(now),
+            Request::Pair => self.pair(now),
+            Request::SaveBackup(path) => self.save_backup(&path, now),
+            Request::RestoreBackup(path) => self.restore_file(&path, now),
+            Request::RestoreOriginal => self.restore_original(now),
             Request::Shutdown => {}
         }
     }
@@ -439,12 +454,28 @@ fn read_status(device: &mut dyn Device) -> konectl::Result<Status> {
 
 /// Sends requests to the worker; cheap to clone into UI callbacks.
 #[derive(Clone)]
-pub struct Requests(Sender<Request>);
+pub struct Requests {
+    sender: Sender<Request>,
+    cancel: Arc<AtomicBool>,
+}
 
 impl Requests {
     pub fn send(&self, request: Request) {
         // Fails only once the worker has ended, when nothing is to be done.
-        let _ = self.0.send(request);
+        let _ = self.sender.send(request);
+    }
+
+    /// Stops the request that waits for the user (pairing), also before
+    /// the worker starts it.
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// Sends a request that [`Self::cancel`] can stop, without an earlier
+    /// cancel.
+    pub fn send_cancellable(&self, request: Request) {
+        self.cancel.store(false, Ordering::SeqCst);
+        self.send(request);
     }
 }
 
@@ -463,13 +494,17 @@ impl WorkerHandle {
         sink: Sink,
     ) -> std::io::Result<Self> {
         let (sender, receiver) = mpsc::channel();
+        let cancel: Arc<AtomicBool> = Arc::default();
+        let worker_cancel: Arc<AtomicBool> = Arc::clone(&cancel);
         let thread = thread::Builder::new()
             .name("konectl-worker".to_owned())
             .spawn(move || {
-                Worker::new(connector(), backups, sink, Instant::now()).run(&receiver);
+                let mut worker = Worker::new(connector(), backups, sink, Instant::now());
+                worker.cancel = worker_cancel;
+                worker.run(&receiver);
             })?;
         Ok(Self {
-            requests: Requests(sender),
+            requests: Requests { sender, cancel },
             thread,
         })
     }
@@ -479,8 +514,10 @@ impl WorkerHandle {
     }
 
     /// Ends the worker after its current request: an interrupted read of
-    /// another profile would leave that profile selected on the mouse.
+    /// another profile would leave that profile selected on the mouse. A
+    /// pairing that waits for the user is cancelled.
     pub fn stop(self) {
+        self.requests.cancel();
         self.requests.send(Request::Shutdown);
         let _ = self.thread.join();
     }
@@ -493,6 +530,7 @@ mod tests {
     use std::sync::{Arc, Mutex, PoisonError};
     use std::time::Duration;
 
+    use konectl::pairing::PairingStep;
     use konectl::{Backup, ProfileSettings};
 
     use super::demo::{DemoConnector, SharedDemo};
@@ -1033,13 +1071,14 @@ mod tests {
         let take = || std::mem::take(&mut *events.lock().unwrap_or_else(PoisonError::into_inner));
         worker.start(Instant::now());
         let start: Vec<Event> = take();
-        let original: Backup = start
+        let snapshot: Snapshot = start
             .iter()
             .find_map(|event| match event {
-                Event::Connected(snapshot) => Some(snapshot.backup.clone()),
+                Event::Connected(snapshot) => Some(snapshot.as_ref().clone()),
                 _ => None,
             })
             .unwrap_or_else(|| panic!("not connected: {start:?}"));
+        let original: Backup = snapshot.backup.clone();
         let profile: u8 = original.active_profile;
         let settings = original
             .profiles
@@ -1094,6 +1133,9 @@ mod tests {
                 volume_up
             },
         });
+        // Debounce, in all profiles.
+        let debounce: u8 = if sensor.debounce_ms() == 3 { 4 } else { 3 };
+        requests.push(Request::Debounce(debounce));
         requests.extend(other.map(Request::ActivateProfile));
         let count: usize = requests.len();
         for request in requests {
@@ -1116,6 +1158,18 @@ mod tests {
             Some(&Event::UndoAvailable(false)),
             "{events:?}"
         );
+        // Energy saving has no undo: switch it, and back.
+        if let Some(enabled) = snapshot.energy_saving {
+            for state in [!enabled, enabled] {
+                worker.handle(Request::EnergySaving(state), Instant::now());
+                let events: Vec<Event> = take();
+                assert_eq!(
+                    changed(&events).snapshot.energy_saving,
+                    Some(state),
+                    "{events:?}"
+                );
+            }
+        }
         worker.handle(Request::Reload, Instant::now());
         let events: Vec<Event> = take();
         let reread: Backup = events
@@ -1126,6 +1180,393 @@ mod tests {
             })
             .expect("read again");
         assert_eq!(reread, original);
+    }
+
+    /// A fresh temporary directory for one test.
+    fn temp_dir(name: &str) -> PathBuf {
+        let directory: PathBuf =
+            std::env::temp_dir().join(format!("konectl-gui-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).expect("directory");
+        directory
+    }
+
+    fn debounces(harness: &Harness) -> Vec<u8> {
+        harness
+            .demo()
+            .backup
+            .profiles
+            .iter()
+            .map(|profile| profile.settings.sensor.debounce_ms())
+            .collect()
+    }
+
+    #[test]
+    fn energy_saving_is_written_without_undo() {
+        let mut harness = Harness::new(None);
+        harness.worker.start(harness.start);
+        harness.take();
+
+        harness
+            .worker
+            .handle(Request::EnergySaving(false), harness.at(100));
+        let events: Vec<Event> = harness.take();
+        let change: &Change = changed(&events);
+        assert_eq!(change.commands.lines, ["konectl energy-saving off"]);
+        assert_eq!(change.snapshot.energy_saving, Some(false));
+        assert!(!harness.demo().energy_saving);
+        assert_eq!(events.last(), Some(&Event::UndoAvailable(false)));
+    }
+
+    #[test]
+    fn debounce_goes_to_every_profile_and_back() {
+        let mut harness = Harness::new(None);
+        harness.worker.start(harness.start);
+        harness.take();
+        let before: Vec<u8> = debounces(&harness);
+
+        harness.worker.handle(Request::Debounce(7), harness.at(100));
+        let events: Vec<Event> = harness.take();
+        assert_eq!(changed(&events).commands.lines, ["konectl debounce 7"]);
+        assert_eq!(debounces(&harness), [7, 7, 7]);
+        assert_eq!(events.last(), Some(&Event::UndoAvailable(true)));
+
+        // Nothing to write the second time.
+        harness.worker.handle(Request::Debounce(7), harness.at(200));
+        assert_eq!(harness.take(), []);
+
+        harness.worker.handle(Request::Undo, harness.at(300));
+        harness.take();
+        assert_eq!(debounces(&harness), before);
+    }
+
+    #[test]
+    fn calibration_counts_down_and_uses_the_distance_everywhere() {
+        let mut harness = Harness::new(None);
+        harness.worker.start(harness.start);
+        harness.take();
+        let before: Backup = harness.demo().backup.clone();
+
+        harness
+            .worker
+            .handle(Request::CalibrateLiftOff, harness.at(100));
+        let events: Vec<Event> = harness.take();
+        let countdown: Vec<u64> = events
+            .iter()
+            .filter_map(|event| match event {
+                Event::Calibration(Some(left)) => Some(*left),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(countdown, (1..=12).rev().collect::<Vec<u64>>());
+        assert!(events.contains(&Event::Calibration(None)));
+        assert_eq!(
+            changed(&events).commands.lines,
+            ["konectl liftoff calibrate"]
+        );
+        assert_eq!(harness.demo().calibrations, 1);
+        assert!(
+            harness
+                .demo()
+                .backup
+                .profiles
+                .iter()
+                .all(|profile| profile.settings.sensor.lift_off() == konectl::LiftOff::Custom)
+        );
+
+        harness.worker.handle(Request::Undo, harness.at(200));
+        harness.take();
+        assert_eq!(harness.demo().backup, before);
+    }
+
+    #[test]
+    fn a_reset_can_be_undone() {
+        let mut harness = Harness::new(None);
+        harness.worker.start(harness.start);
+        harness.take();
+        harness.demo().energy_saving = false;
+        let before: Backup = harness.demo().backup.clone();
+
+        harness.worker.handle(Request::Reset, harness.at(100));
+        let events: Vec<Event> = harness.take();
+        let change: &Change = changed(&events);
+        assert_eq!(change.commands.lines, ["konectl reset"]);
+        assert_eq!(change.snapshot.energy_saving, Some(true));
+        assert_ne!(harness.demo().backup, before);
+
+        harness.worker.handle(Request::Undo, harness.at(200));
+        harness.take();
+        assert_eq!(harness.demo().backup, before);
+    }
+
+    #[test]
+    fn pairing_reports_its_steps_and_reads_the_mouse_again() {
+        let mut harness = Harness::new(None);
+        harness.worker.start(harness.start);
+        harness.take();
+
+        harness.worker.handle(Request::Pair, harness.at(100));
+        let events: Vec<Event> = harness.take();
+        assert_eq!(
+            events[..4],
+            [
+                Event::Pairing(Some(PairingStep::Unplug)),
+                Event::Pairing(Some(PairingStep::Replug)),
+                Event::Pairing(Some(PairingStep::Connect)),
+                Event::Pairing(None),
+            ]
+        );
+        assert!(matches!(events[4], Event::Connected(_)));
+        let change: &Change = changed(&events);
+        assert_eq!(change.commands.lines, ["konectl pair"]);
+        assert!(
+            change
+                .note
+                .as_deref()
+                .is_some_and(|note| note.starts_with("Paired"))
+        );
+        assert_eq!(harness.demo().pairings, 1);
+    }
+
+    #[test]
+    fn pairing_can_be_cancelled() {
+        let mut harness = Harness::new(None);
+        harness.worker.start(harness.start);
+        harness.take();
+        // The user cancels while the dongle should be plugged in again.
+        let events = Arc::clone(&harness.events);
+        let cancel: Arc<AtomicBool> = Arc::clone(&harness.worker.cancel);
+        harness.worker.sink = Box::new(move |event| {
+            if event == Event::Pairing(Some(PairingStep::Replug)) {
+                cancel.store(true, Ordering::SeqCst);
+            }
+            events
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(event);
+        });
+
+        harness.worker.handle(Request::Pair, harness.at(100));
+        let events: Vec<Event> = harness.take();
+        assert_eq!(events[2], Event::Pairing(None));
+        assert!(
+            matches!(&events[3], Event::Message(message) if message.starts_with("Pairing cancelled"))
+        );
+        // The dongle is found again.
+        assert!(matches!(events[4], Event::Connected(_)));
+        assert_eq!(harness.demo().pairings, 0);
+    }
+
+    #[test]
+    fn a_cancel_before_pairing_starts_keeps_the_dongle_as_it_is() {
+        let mut harness = Harness::new(None);
+        harness.worker.start(harness.start);
+        harness.take();
+        // The window closed right after Start.
+        harness.worker.cancel.store(true, Ordering::SeqCst);
+
+        harness.worker.handle(Request::Pair, harness.at(100));
+        let events: Vec<Event> = harness.take();
+        assert_eq!(
+            events,
+            [
+                Event::Message("Pairing cancelled.".to_owned()),
+                Event::Pairing(None)
+            ]
+        );
+        assert!(!harness.demo().pairing);
+    }
+
+    #[test]
+    fn pairs_a_mouse_that_does_not_answer_yet() {
+        let mut harness = Harness::new(None);
+        harness.demo().awake = false;
+        harness.worker.start(harness.start);
+        assert_eq!(harness.take(), [Event::Asleep]);
+
+        harness.worker.handle(Request::Pair, harness.at(100));
+        let events: Vec<Event> = harness.take();
+        assert!(events.contains(&Event::Pairing(None)));
+        assert_eq!(
+            changed(&events).commands.lines,
+            ["konectl pair"],
+            "{events:?}"
+        );
+        assert_eq!(harness.demo().pairings, 1);
+    }
+
+    #[test]
+    fn a_calibration_without_a_mouse_still_ends() {
+        let mut harness = Harness::new(None);
+        harness.demo().awake = false;
+        harness.worker.start(harness.start);
+        harness.take();
+
+        harness
+            .worker
+            .handle(Request::CalibrateLiftOff, harness.at(100));
+        let events: Vec<Event> = harness.take();
+        assert!(matches!(&events[0], Event::Error(_)), "{events:?}");
+        assert_eq!(events.last(), Some(&Event::Calibration(None)));
+    }
+
+    #[test]
+    fn a_restore_while_the_mouse_sleeps_is_not_refused_but_waits() {
+        let directory: PathBuf = temp_dir("restore-asleep");
+        let file: PathBuf = directory.join("mouse.txt");
+        let mut harness = Harness::new(None);
+        harness.worker.start(harness.start);
+        harness.take();
+        let saved: Backup = harness.demo().backup.clone();
+        fs::write(&file, saved.to_text()).expect("file");
+        harness.demo().awake = false;
+
+        harness
+            .worker
+            .handle(Request::RestoreBackup(file), harness.at(100));
+        let events: Vec<Event> = harness.take();
+        assert!(events.contains(&Event::Asleep), "{events:?}");
+        assert!(!events.iter().any(
+            |event| matches!(event, Event::Error(message) if message.starts_with("Not changed"))
+        ));
+        fs::remove_dir_all(&directory).expect("clean up");
+    }
+
+    #[test]
+    fn saving_a_backup_keeps_the_snapshot_for_undo() {
+        let directory: PathBuf = temp_dir("save-keeps-undo");
+        let file: PathBuf = directory.join("mouse.txt");
+        let mut harness = Harness::new(None);
+        harness.worker.start(harness.start);
+        harness.take();
+        harness.worker.handle(dpi(1, Some(400)), harness.at(100));
+        let before: Snapshot = changed(&harness.take()).snapshot.clone();
+        // Another program changes the mouse meanwhile.
+        harness.demo().energy_saving = false;
+        Edit::Speed(9)
+            .apply(&mut harness.demo().backup.profiles[1].settings)
+            .expect("speed");
+
+        harness
+            .worker
+            .handle(Request::SaveBackup(file), harness.at(200));
+        let events: Vec<Event> = harness.take();
+        assert_eq!(changed(&events).snapshot, before);
+        fs::remove_dir_all(&directory).expect("clean up");
+    }
+
+    #[test]
+    fn pairing_needs_the_dongle() {
+        let mut harness = Harness::new(None);
+        harness.demo().cable = true;
+        harness.worker.start(harness.start);
+        harness.take();
+
+        harness.worker.handle(Request::Pair, harness.at(100));
+        let events: Vec<Event> = harness.take();
+        assert!(
+            matches!(&events[..], [Event::Error(message), Event::Pairing(None)] if message.contains("through the dongle"))
+        );
+    }
+
+    #[test]
+    fn saves_a_backup_and_restores_it() {
+        let directory: PathBuf = temp_dir("backup-file");
+        let file: PathBuf = directory.join("mouse.txt");
+        let mut harness = Harness::new(None);
+        harness.worker.start(harness.start);
+        harness.take();
+        let saved: Backup = harness.demo().backup.clone();
+
+        harness
+            .worker
+            .handle(Request::SaveBackup(file.clone()), harness.at(100));
+        let events: Vec<Event> = harness.take();
+        assert_eq!(
+            changed(&events).commands.lines,
+            [format!("konectl backup {}", file.display())]
+        );
+        let text: String = fs::read_to_string(&file).expect("saved");
+        assert_eq!(Backup::from_text(&text).expect("valid"), saved);
+
+        harness.worker.handle(dpi(1, Some(400)), harness.at(200));
+        harness.take();
+        assert_ne!(harness.demo().backup, saved);
+
+        harness
+            .worker
+            .handle(Request::RestoreBackup(file.clone()), harness.at(300));
+        let events: Vec<Event> = harness.take();
+        let change: &Change = changed(&events);
+        assert_eq!(
+            change.note.as_deref(),
+            Some(format!("Restored 3 profiles from {}.", file.display()).as_str())
+        );
+        assert_eq!(harness.demo().backup, saved);
+        assert_eq!(events.last(), Some(&Event::UndoAvailable(true)));
+        fs::remove_dir_all(&directory).expect("clean up");
+    }
+
+    #[test]
+    fn a_file_that_is_no_backup_changes_nothing() {
+        let directory: PathBuf = temp_dir("not-a-backup");
+        let file: PathBuf = directory.join("notes.txt");
+        fs::write(&file, "shopping list\n").expect("file");
+        let mut harness = Harness::new(None);
+        harness.worker.start(harness.start);
+        harness.take();
+        let before: Backup = harness.demo().backup.clone();
+
+        harness
+            .worker
+            .handle(Request::RestoreBackup(file), harness.at(100));
+        let events: Vec<Event> = harness.take();
+        assert!(
+            matches!(&events[..], [Event::Error(message)] if message.starts_with("Could not use"))
+        );
+        assert_eq!(harness.demo().backup, before);
+        fs::remove_dir_all(&directory).expect("clean up");
+    }
+
+    #[test]
+    fn restores_the_state_before_the_first_change() {
+        let directory: PathBuf = temp_dir("original");
+        let mut harness = Harness::new(Some(SafetyBackups::in_dir(&directory)));
+        harness.worker.start(harness.start);
+        harness.take();
+        let original: Backup = harness.demo().backup.clone();
+
+        harness.worker.handle(dpi(1, Some(400)), harness.at(100));
+        harness.worker.handle(dpi(1, Some(450)), harness.at(200));
+        harness.take();
+
+        harness
+            .worker
+            .handle(Request::RestoreOriginal, harness.at(300));
+        let events: Vec<Event> = harness.take();
+        assert!(
+            changed(&events)
+                .note
+                .as_deref()
+                .is_some_and(|note| note.contains("first change"))
+        );
+        assert_eq!(harness.demo().backup, original);
+        fs::remove_dir_all(&directory).expect("clean up");
+    }
+
+    #[test]
+    fn no_original_settings_without_safety_backups() {
+        let mut harness = Harness::new(None);
+        harness.worker.start(harness.start);
+        harness.take();
+
+        harness
+            .worker
+            .handle(Request::RestoreOriginal, harness.at(100));
+        let events: Vec<Event> = harness.take();
+        assert!(
+            matches!(&events[..], [Event::Error(message)] if message.contains("no safety backups"))
+        );
     }
 
     #[test]

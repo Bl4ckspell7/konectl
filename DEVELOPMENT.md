@@ -51,12 +51,44 @@ With the mouse connected and awake, `cargo test -p konectl-gui -- --ignored
 --test-threads=1` reads it and writes a few changes, then undoes them and checks that the
 mouse is as before.
 
+## Packaging
+
+The **Package** workflow (`.github/workflows/package.yml`) runs on pull requests and for
+every release, which attaches its files to the GitHub release:
+
+- a tarball with both programs, the desktop file, the AppStream metadata and the icon
+  (`scripts/release/tarball.sh`), built in a Debian 12 container, so it runs with glibc
+  2.36 or newer;
+- a Flatpak bundle of the GUI (`io.github.bl4ckspell7.konectl.yml`, runtime
+  `org.freedesktop.Platform` 26.08). The build runs offline: the workflow first turns
+  `Cargo.lock` into `cargo-sources.json` with flatpak-cargo-generator (not committed).
+
+The desktop file, metadata and icon are in `crates/konectl-gui/data/`. Their app ID,
+`io.github.bl4ckspell7.konectl`, is also the Wayland app ID the GUI sets
+(`src/main.rs`). The release bump adds the new version to the metadata's `<releases>`.
+
+Locally:
+
+```sh
+cargo build --release --locked -p konectl-cli -p konectl-gui
+scripts/release/tarball.sh 0.0.0-test     # → dist/konectl-0.0.0-test-x86_64-linux.tar.gz
+
+uvx --from flatpak-cargo-generator flatpak-cargo-generator Cargo.lock -o cargo-sources.json
+flatpak-builder --user --install-deps-from=flathub --force-clean flatpak-build \
+    io.github.bl4ckspell7.konectl.yml
+flatpak-builder --run flatpak-build io.github.bl4ckspell7.konectl.yml konectl-gui
+```
+
+The README screenshots (`docs/screenshots/`) come from the demo mouse: run
+`--screenshots DIR` (see [GUI](#gui)) and convert the PPM files to PNG.
+
 ## Dependencies
 
 Renovate (`renovate.json`, `.github/workflows/renovate.yml`) runs once a day and opens
-pull requests for Cargo dependencies, GitHub Actions, the CI container image, the VM
-image in `tools/re/compose.yaml` and git-cliff. New releases wait 5 days, `Cargo.lock` is
-refreshed on Mondays, and the dependency dashboard issue lists everything pending.
+pull requests for Cargo dependencies, GitHub Actions, the CI container images, the VM
+image in `tools/re/compose.yaml`, git-cliff and flatpak-cargo-generator. New releases wait
+5 days, `Cargo.lock` is refreshed on Mondays, and the dependency dashboard issue lists
+everything pending.
 
 It needs the `RENOVATE_TOKEN` secret: a fine-grained personal access token for this
 repository with read and write access to contents, commit statuses, issues, pull requests
@@ -76,24 +108,31 @@ changelog are derived from them.
 
    Leave **`dry_run` checked** the first time.
 2. **Review the dry-run job summary.** It shows the computed version and the release
-   notes, and the job checks that both crates package.
+   notes, and the job checks that all crates package.
 3. **Run it again with `dry_run` unchecked** (from `main`; other branches are refused).
-   The `release` job bumps the version (`Cargo.toml`, `Cargo.lock`), updates
-   `CHANGELOG.md`, runs the tests, then commits
+   The `release` job bumps the version (`Cargo.toml`, `Cargo.lock`, the GUI's AppStream
+   metadata), updates `CHANGELOG.md`, runs the tests, then commits
    `chore(release): vX.Y.Z` and pushes it together with the tag.
-4. The `publish` job publishes `konectl`, then `konectl-cli`, to crates.io with Trusted
+4. The `publish` job publishes `konectl`, then `konectl-cli` and `konectl-gui`, to
+   crates.io with Trusted
    Publishing through
    [crates-io-auth-action](https://github.com/rust-lang/crates-io-auth-action) (no stored
    token). It runs in the `crates-io` environment; approve it there if the environment
    requires a reviewer. Versions already on crates.io are skipped, so if it fails, re-run
    the failed jobs.
-5. The `github-release` job opens a **draft** GitHub release with the release notes.
-   **Review it, then publish it.**
+5. The `package` job builds the tarball and the Flatpak bundle from the tag (the
+   **Package** workflow).
+6. The `github-release` job opens a **draft** GitHub release with the release notes and
+   the packages. **Review it, then publish it.**
 
 ### One-time setup
 
-- crates.io, for both crates: **Settings → Trusted Publishing → GitHub**, with owner
+- crates.io, for each crate: **Settings → Trusted Publishing → GitHub**, with owner
   `Bl4ckspell7`, repository `konectl`, workflow `release.yml` and environment `crates-io`.
+  This is only possible once the crate exists, so a new crate (like `konectl-gui` in
+  0.4.0) fails in the `publish` job the first time: publish it by hand from the release
+  tag (`git switch --detach vX.Y.Z && cargo publish -p konectl-gui`, with an API token),
+  set up Trusted Publishing for it, then re-run the failed jobs.
 - GitHub: **Settings → Environments → New environment** `crates-io` (optionally with a
   required reviewer).
 

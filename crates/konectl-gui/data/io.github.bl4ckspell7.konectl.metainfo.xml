@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.bl4ckspell7.konectl</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <name>konectl</name>
+  <summary>Configure the ROCCAT Kone Pro Air mouse</summary>
+  <developer id="io.github.bl4ckspell7">
+    <name>Bl4ckspell7</name>
+  </developer>
+
+  <description>
+    <p>
+      An unofficial app to configure the ROCCAT Kone Pro Air mouse on Linux,
+      without the official Windows software. Every change is written to the
+      mouse right away and can be undone.
+    </p>
+    <ul>
+      <li>DPI stages, polling rate, lift-off distance and angle snapping</li>
+      <li>Lighting with a live preview: effect, colours, brightness and speed</li>
+      <li>Button functions in both layers, keys and macros</li>
+      <li>Profiles: activate, add, remove and colour them</li>
+      <li>Energy saving, debounce, lift-off calibration, pairing with the dongle</li>
+      <li>Backups of all profiles, factory reset</li>
+    </ul>
+    <p>
+      Each change also shows the matching command of the konectl command-line
+      tool. The app needs access to the mouse's configuration interface: it
+      offers to install a udev rule, or shows the command for it.
+    </p>
+    <p>Not affiliated with ROCCAT or Turtle Beach.</p>
+  </description>
+
+  <launchable type="desktop-id">io.github.bl4ckspell7.konectl.desktop</launchable>
+  <provides>
+    <binary>konectl-gui</binary>
+  </provides>
+
+  <url type="homepage">https://github.com/Bl4ckspell7/konectl</url>
+  <url type="bugtracker">https://github.com/Bl4ckspell7/konectl/issues</url>
+  <url type="vcs-browser">https://github.com/Bl4ckspell7/konectl</url>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>Performance: DPI stages and sensor settings</caption>
+      <image>https://raw.githubusercontent.com/Bl4ckspell7/konectl/main/docs/screenshots/performance.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Lighting with a live preview</caption>
+      <image>https://raw.githubusercontent.com/Bl4ckspell7/konectl/main/docs/screenshots/lighting.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Button functions</caption>
+      <image>https://raw.githubusercontent.com/Bl4ckspell7/konectl/main/docs/screenshots/buttons.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Device: pairing, backups and settings for the whole mouse</caption>
+      <image>https://raw.githubusercontent.com/Bl4ckspell7/konectl/main/docs/screenshots/device.png</image>
+    </screenshot>
+  </screenshots>
+
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+
+  <categories>
+    <category>Settings</category>
+    <category>HardwareSettings</category>
+  </categories>
+  <keywords>
+    <keyword>mouse</keyword>
+    <keyword>roccat</keyword>
+    <keyword>kone</keyword>
+    <keyword>dpi</keyword>
+    <keyword>rgb</keyword>
+  </keywords>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+  </releases>
+</component>

@@ -1,5 +1,8 @@
 //! Messages between the user interface and the worker.
 
+use std::path::PathBuf;
+
+use konectl::pairing::PairingStep;
 use konectl::{Backup, ButtonAction, ConnectionMode, Layer, MacroMode, Rgb};
 
 use super::device::{Firmwares, Power};
@@ -47,6 +50,24 @@ pub enum Request {
     },
     /// Go back to the state before the last change.
     Undo,
+    /// Energy saving on or off (one setting for all profiles).
+    EnergySaving(bool),
+    /// The debounce time in every profile.
+    Debounce(u8),
+    /// Measure the lift-off distance (the user moves the mouse meanwhile),
+    /// then use it in every profile.
+    CalibrateLiftOff,
+    /// Back to the factory settings.
+    Reset,
+    /// Pair the mouse with the dongle; the user follows the steps the worker
+    /// reports. Cancelled with [`super::Requests::cancel`].
+    Pair,
+    /// Save all profiles to a file.
+    SaveBackup(PathBuf),
+    /// Write the profiles from a file back to the mouse.
+    RestoreBackup(PathBuf),
+    /// Write back the state before konectl's first change (`original.txt`).
+    RestoreOriginal,
     /// Finish the current request and end the worker.
     Shutdown,
 }
@@ -74,8 +95,16 @@ pub enum Event {
     Busy(Option<&'static str>),
     /// A request failed.
     Error(String),
+    /// What a request did when there is no change to show with it (e.g.
+    /// pairing was cancelled).
+    Message(String),
     /// Another program changed the mouse (it saved a safety backup).
     ChangedElsewhere,
+    /// The lift-off calibration runs: seconds left, or `None` once it is
+    /// over.
+    Calibration(Option<u64>),
+    /// Pairing waits for this step, or `None` once it is over.
+    Pairing(Option<PairingStep>),
 }
 
 /// A written change.
