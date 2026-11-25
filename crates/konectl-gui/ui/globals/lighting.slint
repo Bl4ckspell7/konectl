@@ -1,0 +1,22 @@
+// The Lighting page, set from Rust (`src/ui/lighting.rs`). Sliders write when
+// they are released.
+
+export global Lighting {
+    out property <[string]> effects: ["Off", "Static", "Breathing", "Heartbeat", "Wave", "Blinking", "AIMO", "Battery"];
+    // -1: an effect konectl does not know.
+    in-out property <int> effect;
+    in-out property <float> brightness;
+    in-out property <float> speed;
+    in-out property <color> left;
+    in-out property <color> right;
+    in-out property <float> left-intensity;
+    in-out property <float> right-intensity;
+
+    callback set-effect(int);
+    callback set-brightness(int);
+    callback set-speed(int);
+    callback set-left(color);
+    callback set-right(color);
+    callback set-left-intensity(int);
+    callback set-right-intensity(int);
+}

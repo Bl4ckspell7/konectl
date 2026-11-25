@@ -1,0 +1,234 @@
+// A colour swatch that opens a picker: preset colours, hue and saturation, or
+// a colour typed as rrggbb. `picked` comes once, when the choice is made.
+import { Button, LineEdit, Palette } from "std-widgets.slint";
+import { AppState } from "../../globals/app-state.slint";
+import { Theme } from "../../globals/theme.slint";
+
+component Swatch inherits Rectangle {
+    in property <color> swatch;
+    callback clicked();
+
+    min-width: 24px;
+    max-width: 24px;
+    min-height: 24px;
+    max-height: 24px;
+    border-radius: 4px;
+    background: root.swatch;
+    border-width: 1px;
+    border-color: Palette.border;
+
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// A bar with a marker that follows the mouse; `released` when it lets go.
+component GradientBar inherits Rectangle {
+    in property <brush> track;
+    in-out property <float> value;
+    callback released(float);
+
+    min-height: 20px;
+    max-height: 20px;
+    border-radius: 4px;
+    background: root.track;
+    border-width: 1px;
+    border-color: Palette.border;
+
+    Rectangle {
+        x: root.value * (root.width - self.width);
+        y: -2px;
+        width: 6px;
+        height: root.height + 4px;
+        border-radius: 3px;
+        background: white;
+        border-width: 1px;
+        border-color: #00000099;
+    }
+
+    TouchArea {
+        mouse-cursor: pointer;
+        moved => {
+            if self.pressed {
+                root.value = clamp(self.mouse-x / root.width, 0, 1);
+            }
+        }
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.down {
+                root.value = clamp(self.mouse-x / root.width, 0, 1);
+            }
+            if event.kind == PointerEventKind.up {
+                root.released(root.value);
+            }
+        }
+    }
+}
+
+export component ColorButton {
+    in property <color> color;
+    in property <bool> has-color: true;
+    // Offers "No colour" (profile colours can be unset).
+    in property <bool> allow-none;
+    in property <bool> enabled: true;
+    in property <string> label;
+    callback picked(color);
+    callback cleared();
+
+    property <float> hue;
+    property <float> saturation;
+    property <[color]> presets: [
+        #ff0000, #ff6a00, #ffd000, #80ff00, #00ff40, #00ffc0, #00c0ff, #0050ff,
+        #4000ff, #a000ff, #ff00d0, #ff0060, #ffffff, #ffb070, #a0d0ff, #bf0bdc,
+    ];
+
+    min-width: 56px;
+    max-width: 56px;
+    min-height: 30px;
+    max-height: 30px;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => {
+        root.open();
+    }
+
+    function open() {
+        root.hue = root.color.to-hsv().hue / 360;
+        root.saturation = root.color.to-hsv().saturation;
+        popup.show();
+    }
+
+    function pick(chosen: color) {
+        popup.close();
+        root.picked(chosen);
+    }
+
+    function pick-text(text: string) {
+        if AppState.parse-color(text).valid {
+            root.pick(AppState.parse-color(text).color);
+        }
+    }
+
+    Rectangle {
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: Palette.border;
+        background: Palette.control-background;
+        opacity: root.enabled ? 1 : 0.5;
+
+        Rectangle {
+            x: 4px;
+            y: 4px;
+            width: parent.width - 8px;
+            height: parent.height - 8px;
+            border-radius: 4px;
+            background: root.has-color ? root.color : transparent;
+            border-width: root.has-color ? 0 : 1px;
+            border-color: Palette.border;
+
+            if !root.has-color: Text {
+                text: "none";
+                font-size: 10px;
+                color: Theme.muted;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+
+        TouchArea {
+            enabled: root.enabled;
+            mouse-cursor: pointer;
+            clicked => {
+                root.open();
+            }
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        width: 256px;
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            background: Palette.background;
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: Palette.border;
+            drop-shadow-blur: 10px;
+            drop-shadow-color: #00000040;
+
+            VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+
+                for row in [0, 1]: HorizontalLayout {
+                    spacing: 6px;
+
+                    for index in 8: Swatch {
+                        swatch: root.presets[row * 8 + index];
+                        clicked => {
+                            root.pick(self.swatch);
+                        }
+                    }
+                }
+
+                Text {
+                    text: "Hue";
+                    font-size: 12px;
+                    color: Theme.muted;
+                }
+
+                GradientBar {
+                    track: @linear-gradient(90deg, #ff0000 0%, #ffff00 16.7%, #00ff00 33.3%, #00ffff 50%, #0000ff 66.7%, #ff00ff 83.3%, #ff0000 100%);
+                    value <=> root.hue;
+                    released => {
+                        root.pick(hsv(root.hue * 360, root.saturation, 1));
+                    }
+                }
+
+                Text {
+                    text: "Saturation";
+                    font-size: 12px;
+                    color: Theme.muted;
+                }
+
+                GradientBar {
+                    track: @linear-gradient(90deg, #ffffff 0%, hsv(root.hue * 360, 1, 1) 100%);
+                    value <=> root.saturation;
+                    released => {
+                        root.pick(hsv(root.hue * 360, root.saturation, 1));
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 6px;
+
+                    hex := LineEdit {
+                        placeholder-text: "rrggbb";
+                        accepted(text) => {
+                            root.pick-text(text);
+                        }
+                    }
+
+                    Button {
+                        text: "Set";
+                        clicked => {
+                            root.pick-text(hex.text);
+                        }
+                    }
+                }
+
+                if root.allow-none: Button {
+                    text: "No colour";
+                    clicked => {
+                        popup.close();
+                        root.cleared();
+                    }
+                }
+            }
+        }
+    }
+}

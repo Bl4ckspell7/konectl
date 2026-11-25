@@ -47,3 +47,23 @@ export component InfoRow {
         }
     }
 }
+
+// A label and a control (or a row of them) in a group.
+export component Row {
+    in property <string> label;
+    in property <length> label-width: Theme.label-width;
+
+    HorizontalLayout {
+        spacing: 12px;
+
+        Text {
+            text: root.label;
+            min-width: root.label-width;
+            max-width: root.label-width;
+            color: Theme.muted;
+            vertical-alignment: center;
+        }
+
+        @children
+    }
+}

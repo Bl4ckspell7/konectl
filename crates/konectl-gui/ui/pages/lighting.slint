@@ -1,0 +1,186 @@
+// The Lighting page: effect, brightness, speed, the two colours, preview.
+import { ComboBox, Slider } from "std-widgets.slint";
+import { AppState } from "../globals/app-state.slint";
+import { Lighting } from "../globals/lighting.slint";
+import { Theme } from "../globals/theme.slint";
+import { Group, Row } from "../components/widgets/group.slint";
+import { ColorButton } from "../components/widgets/color-picker.slint";
+import { LedPreview } from "../components/led-preview.slint";
+
+// A slider that writes when it is released, with its value next to it.
+component ValueSlider {
+    in property <float> minimum;
+    in property <float> maximum: 100;
+    in-out property <float> value;
+    in property <bool> enabled;
+    in property <string> unit;
+    callback released(int);
+
+    HorizontalLayout {
+        spacing: 10px;
+
+        Slider {
+            minimum: root.minimum;
+            maximum: root.maximum;
+            step: 1;
+            value <=> root.value;
+            enabled: root.enabled;
+            horizontal-stretch: 1;
+            released(value) => {
+                root.released(round(value));
+            }
+        }
+
+        Text {
+            text: round(root.value) + root.unit;
+            min-width: 44px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component LightingPage {
+    in property <bool> idle;
+    in property <bool> shown;
+    property <bool> lit: Lighting.effect != 0;
+
+    HorizontalLayout {
+        spacing: Theme.padding;
+
+        VerticalLayout {
+            alignment: start;
+            spacing: Theme.padding;
+            horizontal-stretch: 3;
+
+            Group {
+                title: "Effect";
+
+                Row {
+                    label: "Effect";
+
+                    ComboBox {
+                        model: Lighting.effects;
+                        current-index <=> Lighting.effect;
+                        enabled: root.idle;
+                        max-height: self.min-height;
+                        selected => {
+                            Lighting.set-effect(self.current-index);
+                        }
+                    }
+                }
+
+                Row {
+                    label: "Brightness";
+
+                    ValueSlider {
+                        value <=> Lighting.brightness;
+                        enabled: root.idle && root.lit;
+                        unit: " %";
+                        released(value) => {
+                            Lighting.set-brightness(value);
+                        }
+                    }
+                }
+
+                Row {
+                    label: "Speed";
+
+                    ValueSlider {
+                        minimum: 1;
+                        maximum: 11;
+                        value <=> Lighting.speed;
+                        enabled: root.idle && root.lit;
+                        released(value) => {
+                            Lighting.set-speed(value);
+                        }
+                    }
+                }
+            }
+
+            Group {
+                title: "Colours";
+
+                Row {
+                    label: "Left";
+
+                    ColorButton {
+                        label: "Left colour";
+                        color: Lighting.left;
+                        enabled: root.idle && root.lit;
+                        picked(chosen) => {
+                            Lighting.left = chosen;
+                            Lighting.set-left(chosen);
+                        }
+                    }
+
+                    ValueSlider {
+                        value <=> Lighting.left-intensity;
+                        enabled: root.idle && root.lit;
+                        unit: " %";
+                        released(value) => {
+                            Lighting.set-left-intensity(value);
+                        }
+                    }
+                }
+
+                Row {
+                    label: "Right";
+
+                    ColorButton {
+                        label: "Right colour";
+                        color: Lighting.right;
+                        enabled: root.idle && root.lit;
+                        picked(chosen) => {
+                            Lighting.right = chosen;
+                            Lighting.set-right(chosen);
+                        }
+                    }
+
+                    ValueSlider {
+                        value <=> Lighting.right-intensity;
+                        enabled: root.idle && root.lit;
+                        unit: " %";
+                        released(value) => {
+                            Lighting.set-right-intensity(value);
+                        }
+                    }
+                }
+
+                Text {
+                    text: "The percentage is the intensity of each colour.";
+                    font-size: 12px;
+                    color: Theme.muted;
+                }
+            }
+        }
+
+        VerticalLayout {
+            alignment: start;
+            horizontal-stretch: 2;
+
+            Group {
+                title: "Preview";
+
+                LedPreview {
+                    effect: Lighting.effect;
+                    left: Lighting.left;
+                    right: Lighting.right;
+                    brightness: Lighting.brightness;
+                    speed: Lighting.speed;
+                    left-intensity: Lighting.left-intensity;
+                    right-intensity: Lighting.right-intensity;
+                    battery: max(AppState.device.battery-level, 0);
+                    running: root.shown;
+                }
+
+                Text {
+                    text: "Roughly as the mouse shows it.";
+                    font-size: 12px;
+                    color: Theme.muted;
+                    horizontal-alignment: center;
+                }
+            }
+        }
+    }
+}

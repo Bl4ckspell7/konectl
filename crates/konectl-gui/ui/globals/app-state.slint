@@ -23,6 +23,20 @@ export struct DeviceView {
     energy-saving: string,
 }
 
+// A profile in the profile bar.
+export struct ProfileView {
+    number: int,
+    color: color,
+    has-color: bool,
+    active: bool,
+}
+
+// A colour typed as text, if it is one.
+export struct ParsedColor {
+    valid: bool,
+    color: color,
+}
+
 export global AppState {
     in property <MouseState> state: MouseState.searching;
     // The pages have data: connected, or asleep after being connected.
@@ -41,9 +55,27 @@ export global AppState {
 
     in-out property <int> page;
 
+    // The profiles in use, and the one the pages show and change.
+    in property <[ProfileView]> profiles;
+    in-out property <int> profile;
+    in property <ProfileView> selected-profile;
+    // What the last change did, or a note on it.
+    in property <string> message;
+    // The same change with the CLI.
+    in property <string> commands;
+    in property <bool> can-undo;
+
     callback reload();
     callback retry();
     callback allow-access();
+    callback profile-selected(int);
+    callback activate-profile(int);
+    callback add-profile(int);
+    callback remove-profile(int);
+    callback set-profile-color(int, color);
+    callback clear-profile-color(int);
+    callback undo();
+    pure callback parse-color(string) -> ParsedColor;
 
     public function dismiss-error() {
         self.error = "";

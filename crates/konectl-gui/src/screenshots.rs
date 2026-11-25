@@ -13,10 +13,11 @@ use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferTyp
 use slint::platform::{Platform, WindowAdapter, WindowEvent};
 use slint::{ComponentHandle as _, PhysicalSize, Rgb8Pixel};
 
+use crate::edit::Edit;
 use crate::generated::{AppState, AppWindow};
-use crate::ui;
+use crate::ui::{self, Model};
 use crate::worker::demo::{self, DemoConnector, DemoState};
-use crate::worker::{Event, Worker};
+use crate::worker::{Event, Request, Worker};
 
 const WIDTH: u32 = 980;
 const HEIGHT: u32 = 660;
@@ -55,12 +56,15 @@ pub fn run(directory: &Path) -> Result<(), String> {
     state.set_manual_commands(crate::access::manual_commands().into());
 
     let shot = |name: &str| save(&window, &directory.join(format!("{name}.ppm")));
+    let mut model = Model::default();
 
     for (name, start) in [("no-access", no_access()), ("searching", unplugged())] {
-        apply_all(&ui, events(start));
+        let (_, events) = demo_worker(start);
+        apply_all(&ui, &mut model, events.take());
         shot(name)?;
     }
-    apply_all(&ui, events(DemoState::new()));
+    let (mut worker, events) = demo_worker(DemoState::new());
+    apply_all(&ui, &mut model, events.take());
     for (page, name) in ["performance", "lighting", "buttons", "device"]
         .into_iter()
         .enumerate()
@@ -68,10 +72,74 @@ pub fn run(directory: &Path) -> Result<(), String> {
         state.set_page(i32::try_from(page).unwrap_or_default());
         shot(name)?;
     }
-    apply_all(&ui, vec![Event::Asleep, Event::ChangedElsewhere]);
+
+    state.set_page(0);
+    worker.handle(
+        Request::Edit {
+            profile: 1,
+            edit: Edit::Dpi {
+                stage: 2,
+                dpi: Some(900),
+            },
+        },
+        Instant::now(),
+    );
+    apply_all(&ui, &mut model, events.take());
+    shot("changed")?;
+
+    apply_all(
+        &ui,
+        &mut model,
+        vec![Event::Asleep, Event::ChangedElsewhere],
+    );
     state.set_error("Example error: the mouse rejected the sensor write.".into());
     shot("banners")?;
+
+    // The smallest window, with all five profiles: nothing may be cut off.
+    state.set_error("".into());
+    apply_all(
+        &ui,
+        &mut model,
+        vec![Event::Connected(Box::new(snapshot_with_five_profiles(
+            &mut worker,
+            &events,
+        )))],
+    );
+    window.set_size(PhysicalSize::new(
+        (ui.get_layout_min_width() * SCALE) as u32,
+        (ui.get_layout_min_height() * SCALE) as u32,
+    ));
+    for (page, name) in ["performance", "lighting"].into_iter().enumerate() {
+        state.set_page(i32::try_from(page).unwrap_or_default());
+        shot(&format!("smallest-{name}"))?;
+    }
     Ok(())
+}
+
+/// The demo mouse with two profiles added.
+fn snapshot_with_five_profiles(worker: &mut Worker, events: &Events) -> crate::worker::Snapshot {
+    for _ in 0..2 {
+        worker.handle(Request::AddProfile { copy_from: 1 }, Instant::now());
+    }
+    events
+        .take()
+        .into_iter()
+        .rev()
+        .find_map(|event| match event {
+            Event::Changed(change) => Some(change.snapshot),
+            _ => None,
+        })
+        .expect("profiles added")
+}
+
+/// Collects a worker's events.
+#[derive(Clone, Default)]
+struct Events(Arc<Mutex<Vec<Event>>>);
+
+impl Events {
+    fn take(&self) -> Vec<Event> {
+        std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner))
+    }
 }
 
 fn no_access() -> DemoState {
@@ -86,15 +154,16 @@ fn unplugged() -> DemoState {
     state
 }
 
-/// What the worker reports when it starts on this demo mouse.
-fn events(start: DemoState) -> Vec<Event> {
-    let events: Arc<Mutex<Vec<Event>>> = Arc::default();
-    let sink_events = Arc::clone(&events);
+/// A started worker on this demo mouse (without safety backups), and its
+/// events.
+fn demo_worker(start: DemoState) -> (Worker, Events) {
+    let events = Events::default();
+    let sink = events.clone();
     let mut worker = Worker::new(
         Box::new(DemoConnector::new(demo::shared(start))),
         None,
         Box::new(move |event| {
-            sink_events
+            sink.0
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(event);
@@ -102,12 +171,12 @@ fn events(start: DemoState) -> Vec<Event> {
         Instant::now(),
     );
     worker.start(Instant::now());
-    std::mem::take(&mut *events.lock().unwrap_or_else(PoisonError::into_inner))
+    (worker, events)
 }
 
-fn apply_all(ui: &AppWindow, events: Vec<Event>) {
+fn apply_all(ui: &AppWindow, model: &mut Model, events: Vec<Event>) {
     for event in events {
-        ui::app::apply(ui, event);
+        ui::app::apply(ui, model, event);
     }
 }
 

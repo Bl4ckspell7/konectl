@@ -1,5 +1,6 @@
 //! Starts the worker for the window: on the real mouse, or in demo mode.
 
+use konectl::safety::SafetyBackups;
 use slint::ComponentHandle as _;
 
 use crate::generated::AppWindow;
@@ -18,7 +19,18 @@ pub fn start(window: &AppWindow) -> std::io::Result<WorkerHandle> {
             None => Box::new(HidConnector::default()),
         }
     };
-    let worker = WorkerHandle::spawn(connector, ui::app::sink(window.as_weak()))?;
-    ui::app::install(window, &worker.requests(), in_demo);
+    let model: ui::SharedModel = ui::SharedModel::default();
+    // The demo never touches the safety backups of the real mouse.
+    let backups: Option<SafetyBackups> = if in_demo {
+        None
+    } else {
+        SafetyBackups::from_env().ok()
+    };
+    let worker = WorkerHandle::spawn(
+        connector,
+        backups,
+        ui::app::sink(window.as_weak(), model.clone()),
+    )?;
+    ui::app::install(window, &worker.requests(), &model, in_demo);
     Ok(worker)
 }

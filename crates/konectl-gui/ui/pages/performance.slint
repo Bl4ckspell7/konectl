@@ -1,0 +1,269 @@
+// The Performance page: DPI stages, sensor, LED time-out.
+import { CheckBox, ComboBox, Palette, SpinBox, Switch } from "std-widgets.slint";
+import { AppState } from "../globals/app-state.slint";
+import { Performance, StageView } from "../globals/performance.slint";
+import { Theme } from "../globals/theme.slint";
+import { Group, Row } from "../components/widgets/group.slint";
+
+// The round mark of the active stage; clicking another one activates it.
+component ActiveMark inherits Rectangle {
+    in property <bool> active;
+    in property <bool> enabled;
+    in property <int> number;
+    callback clicked();
+
+    min-width: 18px;
+    max-width: 18px;
+    min-height: 18px;
+    max-height: 18px;
+    border-radius: 9px;
+    border-width: 2px;
+    border-color: root.active ? Palette.accent-background : Palette.border;
+    opacity: root.enabled || root.active ? 1 : 0.4;
+    accessible-role: checkbox;
+    accessible-label: "Stage " + root.number + " active";
+    accessible-checked: root.active;
+    accessible-action-default => {
+        if root.enabled && !root.active {
+            root.clicked();
+        }
+    }
+
+    Rectangle {
+        x: 4px;
+        y: 4px;
+        width: 10px;
+        height: 10px;
+        border-radius: 5px;
+        background: root.active ? Palette.accent-background : transparent;
+    }
+
+    TouchArea {
+        enabled: root.enabled && !root.active;
+        mouse-cursor: self.enabled ? pointer : default;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component StageRow {
+    in property <int> number;
+    in property <StageView> stage;
+    in property <int> resets;
+    in property <bool> idle;
+
+    // The controls change themselves when used; these put them back to what
+    // the mouse has.
+    function sync() {
+        enabled-box.checked = root.stage.enabled;
+        dpi.value = root.stage.enabled ? root.stage.dpi : 800;
+        auto-box.checked = root.stage.auto;
+    }
+
+    init => {
+        root.sync();
+    }
+    changed stage => {
+        root.sync();
+    }
+    changed resets => {
+        root.sync();
+    }
+
+    HorizontalLayout {
+        spacing: 12px;
+
+        VerticalLayout {
+            alignment: center;
+
+            ActiveMark {
+                number: root.number;
+                active: root.stage.active;
+                enabled: root.stage.enabled && root.idle;
+                clicked => {
+                    Performance.set-active-stage(root.number);
+                }
+            }
+        }
+
+        Text {
+            text: "Stage " + root.number;
+            min-width: 64px;
+            vertical-alignment: center;
+        }
+
+        enabled-box := CheckBox {
+            text: "On";
+            // The active stage cannot be switched off.
+            enabled: root.idle && !root.stage.active;
+            toggled => {
+                Performance.set-stage-enabled(root.number, self.checked);
+            }
+        }
+
+        dpi := SpinBox {
+            minimum: 50;
+            maximum: 19000;
+            step-size: 50;
+            enabled: root.idle && root.stage.enabled;
+            min-width: 140px;
+            max-width: 180px;
+            edited(value) => {
+                Performance.set-dpi(root.number, value);
+            }
+        }
+
+        Text {
+            text: "DPI";
+            color: Theme.muted;
+            vertical-alignment: center;
+        }
+
+        auto-box := CheckBox {
+            text: "AUTO";
+            enabled: root.idle && root.stage.enabled;
+            toggled => {
+                Performance.set-dpi-auto(root.number, self.checked);
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+        }
+    }
+}
+
+export component PerformancePage {
+    in property <bool> idle;
+    property <length> label-width: 120px;
+
+    VerticalLayout {
+        alignment: start;
+        spacing: Theme.padding;
+
+        Group {
+            title: "DPI stages";
+
+            for stage[index] in Performance.stages: StageRow {
+                number: index + 1;
+                stage: stage;
+                resets: Performance.resets;
+                idle: root.idle;
+            }
+
+            Text {
+                text: "The marked stage is active. The DPI button of the mouse switches through the stages that are on.";
+                wrap: word-wrap;
+                font-size: 12px;
+                color: Theme.muted;
+            }
+        }
+
+        HorizontalLayout {
+            spacing: Theme.padding;
+
+            Group {
+                title: "Sensor";
+                horizontal-stretch: 1;
+
+                Row {
+                    label: "Polling rate";
+                    label-width: root.label-width;
+
+                    ComboBox {
+                        model: Performance.rates;
+                        current-index <=> Performance.rate;
+                        enabled: root.idle;
+                        max-height: self.min-height;
+                        selected => {
+                            Performance.set-rate(self.current-index);
+                        }
+                    }
+                }
+
+                Row {
+                    label: "Lift-off distance";
+                    label-width: root.label-width;
+
+                    ComboBox {
+                        model: Performance.lift-offs;
+                        current-index <=> Performance.lift-off;
+                        enabled: root.idle;
+                        max-height: self.min-height;
+                        selected => {
+                            Performance.set-lift-off(self.current-index);
+                        }
+                    }
+                }
+
+                Row {
+                    label: "Angle snapping";
+                    label-width: root.label-width;
+
+                    Switch {
+                        checked <=> Performance.angle-snapping;
+                        enabled: root.idle;
+                        toggled => {
+                            Performance.set-angle-snapping(self.checked);
+                        }
+                    }
+                }
+            }
+
+            Group {
+                title: "LED time-out";
+                horizontal-stretch: 1;
+
+                Row {
+                    label: "Time-out";
+                    label-width: root.label-width;
+
+                    Switch {
+                        checked <=> Performance.led-timeout;
+                        enabled: root.idle;
+                        toggled => {
+                            Performance.set-led-timeout(self.checked, Performance.led-timeout-minutes, Performance.led-timeout-effect);
+                        }
+                    }
+                }
+
+                Row {
+                    label: "After";
+                    label-width: root.label-width;
+
+                    SpinBox {
+                        minimum: 1;
+                        maximum: 255;
+                        value <=> Performance.led-timeout-minutes;
+                        enabled: root.idle && Performance.led-timeout;
+                        edited(value) => {
+                            Performance.set-led-timeout-minutes(value);
+                        }
+                    }
+
+                    Text {
+                        text: "minutes";
+                        color: Theme.muted;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Row {
+                    label: "Then";
+                    label-width: root.label-width;
+
+                    ComboBox {
+                        model: Performance.led-timeout-effects;
+                        current-index <=> Performance.led-timeout-effect;
+                        enabled: root.idle && Performance.led-timeout;
+                        max-height: self.min-height;
+                        selected => {
+                            Performance.set-led-timeout(true, Performance.led-timeout-minutes, self.current-index);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
