@@ -76,6 +76,9 @@ const DUPLICATE_WAIT_MS: i32 = if cfg!(test) { 0 } else { 100 };
 const MAX_RAW_REPLIES: usize = 64;
 /// Upper bound on stale reports discarded before a request.
 const MAX_STALE_REPORTS: usize = 64;
+/// How long a read-back that differed waits for late answers before it reads
+/// again.
+const LATE_ANSWER_WAIT_MS: i32 = 50;
 
 /// How the mouse is connected to the computer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1009,7 +1012,31 @@ impl<T: Transport> KoneProAir<T> {
             }
         }
 
-        // Read back exactly the blocks that were written.
+        // The dongle sometimes delivers an answer twice, and a late copy of
+        // an earlier read can stand in for the read-back: on a difference,
+        // let late answers arrive, drop them and read once more.
+        if self
+            .read_back(profile, sensor, lighting, buttons)?
+            .is_none()
+        {
+            return Ok(());
+        }
+        self.discard_pending(LATE_ANSWER_WAIT_MS)?;
+        match self.read_back(profile, sensor, lighting, buttons)? {
+            None => Ok(()),
+            Some(what) => Err(Error::VerifyFailed(what)),
+        }
+    }
+
+    /// Reads back exactly the blocks that were written; the name of the
+    /// first one that differs, if any.
+    fn read_back(
+        &mut self,
+        profile: u8,
+        sensor: &Sensor,
+        lighting: Option<&Lighting>,
+        buttons: Option<&Buttons>,
+    ) -> Result<Option<&'static str>> {
         let (stored_sensor, stored_lighting, stored_buttons) =
             self.read_profile(Some(profile), |mouse, target| {
                 let sensor: Sensor = mouse.read_selected_sensor(target)?;
@@ -1022,7 +1049,7 @@ impl<T: Transport> KoneProAir<T> {
                 Ok((sensor, lighting, buttons))
             })?;
         if stored_sensor.bytes() != sensor.write_bytes() {
-            return Err(Error::VerifyFailed("sensor settings"));
+            return Ok(Some("sensor settings"));
         }
         if let (Some(lighting), Some(stored)) = (lighting, stored_lighting) {
             // With the AIMO effect the mouse reports what it currently shows
@@ -1033,15 +1060,15 @@ impl<T: Transport> KoneProAir<T> {
                 stored == *lighting
             };
             if !lighting_stored {
-                return Err(Error::VerifyFailed("lighting settings"));
+                return Ok(Some("lighting settings"));
             }
         }
         if let (Some(buttons), Some(stored)) = (buttons, stored_buttons)
             && stored != *buttons
         {
-            return Err(Error::VerifyFailed("buttons"));
+            return Ok(Some("buttons"));
         }
-        Ok(())
+        Ok(None)
     }
 
     /// Sends an arbitrary report and returns every reply that follows, until
@@ -1396,13 +1423,33 @@ mod tests {
         ));
     }
 
+    /// The read-back part of [`write_batches`]: what the mouse reports.
+    fn read_back_batches(stored: &ProfileSettings) -> Vec<Vec<Report>> {
+        write_batches(stored).split_off(4)
+    }
+
     #[test]
     fn write_that_does_not_read_back_fails() {
-        let mut mouse = connect(write_batches(&start_settings()));
+        // Read back twice: the second read shows the same.
+        let mut batches = write_batches(&start_settings());
+        batches.extend(read_back_batches(&start_settings()));
+        let mut mouse = connect(batches);
         assert!(matches!(
             mouse.write_settings(&changed_settings()),
             Err(Error::VerifyFailed("sensor settings"))
         ));
+    }
+
+    #[test]
+    fn a_late_copy_of_an_earlier_answer_is_read_again() {
+        // The first read-back gets an old lighting answer; the second the
+        // written one.
+        let mut stale = changed_settings();
+        stale.lighting = start_settings().lighting;
+        let mut batches = write_batches(&stale);
+        batches.extend(read_back_batches(&changed_settings()));
+        let mut mouse = connect(batches);
+        mouse.write_settings(&changed_settings()).expect("verified");
     }
 
     #[test]
@@ -1694,7 +1741,11 @@ mod tests {
         buttons
             .set_action(7, Layer::Standard, ButtonAction::Disabled)
             .expect("allowed");
-        let mut mouse = connect(write_button_batches(&start_buttons()));
+        // Read back twice: the second read shows the same.
+        let mut batches = write_button_batches(&start_buttons());
+        let read_back: Vec<Vec<Report>> = batches[batches.len() - 5..].to_vec();
+        batches.extend(read_back);
+        let mut mouse = connect(batches);
         assert!(matches!(
             mouse.write_buttons(&buttons),
             Err(Error::VerifyFailed("buttons"))
