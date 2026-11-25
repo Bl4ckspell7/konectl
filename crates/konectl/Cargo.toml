@@ -12,6 +12,7 @@ readme = "../../README.md"
 
 [dependencies]
 hidapi.workspace = true
+log.workspace = true
 thiserror.workspace = true
 
 [lints]

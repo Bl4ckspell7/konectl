@@ -176,6 +176,12 @@ impl Manager {
 
     /// Opens and initialises the given device.
     pub fn open(&self, info: &DeviceInfo) -> Result<KoneProAir<HidTransport>> {
+        // Not the serial number: logs end up in bug reports.
+        log::debug!(
+            "opening the {} connection at {}",
+            info.mode,
+            info.path.to_string_lossy()
+        );
         let device = self.api.open_path(&info.path)?;
         KoneProAir::connect(HidTransport::new(device), info.mode)
     }
@@ -1015,12 +1021,10 @@ impl<T: Transport> KoneProAir<T> {
         // The dongle sometimes delivers an answer twice, and a late copy of
         // an earlier read can stand in for the read-back: on a difference,
         // let late answers arrive, drop them and read once more.
-        if self
-            .read_back(profile, sensor, lighting, buttons)?
-            .is_none()
-        {
+        let Some(differs) = self.read_back(profile, sensor, lighting, buttons)? else {
             return Ok(());
-        }
+        };
+        log::debug!("read-back of the {differs} of profile {profile} differs; reading once more");
         self.discard_pending(LATE_ANSWER_WAIT_MS)?;
         match self.read_back(profile, sensor, lighting, buttons)? {
             None => Ok(()),
@@ -1142,6 +1146,9 @@ impl<T: Transport> KoneProAir<T> {
         classify: impl Fn(&Report) -> Option<Result<R>>,
     ) -> Result<R> {
         for attempt in 0..=retries {
+            if attempt > 0 {
+                log::debug!("{what}: no answer, sending it again");
+            }
             self.discard_pending(0)?;
             self.transport.write_report(report)?;
             if let Some(outcome) = self.await_reply_within(deadline, &classify)? {
@@ -1151,6 +1158,11 @@ impl<T: Transport> KoneProAir<T> {
                 }
                 return outcome;
             }
+        }
+        if retries == 0 {
+            log::debug!("{what}: no answer");
+        } else {
+            log::debug!("{what}: no answer after {} attempts", retries + 1);
         }
         Err(Error::Timeout(what))
     }
