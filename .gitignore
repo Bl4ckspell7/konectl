@@ -1,3 +1,11 @@
 /target
 # Raw USB captures: may contain device identifiers, never commit them.
 /tools/re/captures/
+# Flatpak build output, and the crate sources generated for it.
+/.flatpak-builder/
+/flatpak-build/
+/repo/
+/cargo-sources.json
+/*.flatpak
+# Release tarballs (scripts/release/tarball.sh).
+/dist/

@@ -27,6 +27,14 @@
       "matchStrings": ["git-cliff==(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
       "datasourceTemplate": "pypi",
       "depNameTemplate": "git-cliff"
+    },
+    {
+      "customType": "regex",
+      "description": "flatpak-cargo-generator, run with uv in the package workflow.",
+      "managerFilePatterns": ["/^\\.github/workflows/package\\.yml$/"],
+      "matchStrings": ["flatpak-cargo-generator==(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "datasourceTemplate": "pypi",
+      "depNameTemplate": "flatpak-cargo-generator"
     }
   ],
   "packageRules": [

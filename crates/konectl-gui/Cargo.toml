@@ -10,8 +10,6 @@ repository.workspace = true
 keywords.workspace = true
 categories = ["hardware-support", "gui"]
 readme = "../../README.md"
-# Not on crates.io until the app is complete.
-publish = false
 
 [dependencies]
 konectl.workspace = true

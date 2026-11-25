@@ -1,0 +1,49 @@
+# Flatpak manifest of the konectl GUI. CI builds it into a bundle
+# (.github/workflows/package.yml); see DEVELOPMENT.md for a local build.
+# cargo-sources.json is generated from Cargo.lock before the build.
+app-id: io.github.bl4ckspell7.konectl
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: konectl-gui
+
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # The mouse's configuration interface is a /dev/hidraw* node; there is no
+  # narrower permission for it. This also gives the GPU.
+  - --device=all
+
+modules:
+  - name: konectl-gui
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/konectl-gui/cargo
+        CARGO_NET_OFFLINE: 'true'
+    build-commands:
+      - cargo --offline fetch --manifest-path Cargo.toml --verbose
+      - cargo --offline build --release --locked -p konectl-gui
+      - install -Dm0755 target/release/konectl-gui ${FLATPAK_DEST}/bin/konectl-gui
+      - install -Dm0644 crates/konectl-gui/data/${FLATPAK_ID}.desktop ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
+      - install -Dm0644 crates/konectl-gui/data/${FLATPAK_ID}.metainfo.xml ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.metainfo.xml
+      - install -Dm0644 crates/konectl-gui/data/icons/${FLATPAK_ID}.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/${FLATPAK_ID}.svg
+      - desktop-file-validate ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
+      - appstreamcli validate --no-net ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.metainfo.xml
+    sources:
+      - type: dir
+        path: .
+        # flatpak-builder ignores .gitignore: leave out build output and the
+        # protocol captures.
+        skip:
+          - target
+          - .git
+          - .flatpak-builder
+          - flatpak-build
+          - repo
+          - tools/re/captures
+      - cargo-sources.json
