@@ -1,6 +1,5 @@
 // The Lighting page: effect, brightness, speed, the two colours, preview.
 import { ComboBox, Slider } from "std-widgets.slint";
-import { AppState } from "../globals/app-state.slint";
 import { Lighting } from "../globals/lighting.slint";
 import { Theme } from "../globals/theme.slint";
 import { Group, Row } from "../components/widgets/group.slint";
@@ -170,7 +169,6 @@ export component LightingPage {
                     speed: Lighting.speed;
                     left-intensity: Lighting.left-intensity;
                     right-intensity: Lighting.right-intensity;
-                    battery: max(AppState.device.battery-level, 0);
                     running: root.shown;
                 }
 

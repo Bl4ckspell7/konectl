@@ -27,6 +27,7 @@ pub fn install(ui: &AppWindow, requests: &Requests, model: &SharedModel, demo: b
 
     super::profiles::install(ui, requests, model);
     super::performance::install(ui, requests, model);
+    super::buttons::install(ui, requests, model);
     super::lighting::install(ui, requests);
 }
 
@@ -114,6 +115,8 @@ fn forget(ui: &AppWindow, model: &mut Model) {
     state.set_commands("".into());
     state.set_message("".into());
     model.snapshot = None;
+    model.button_shown = None;
+    model.button_group = None;
 }
 
 /// Shows a snapshot; `select` is the profile to show, else the shown one if
@@ -139,7 +142,7 @@ fn show(ui: &AppWindow, model: &mut Model, snapshot: Snapshot, select: Option<u8
 }
 
 /// Shows the settings of the selected profile.
-pub fn show_profile(ui: &AppWindow, model: &Model) {
+pub fn show_profile(ui: &AppWindow, model: &mut Model) {
     let Some(snapshot) = &model.snapshot else {
         return;
     };
@@ -153,6 +156,8 @@ pub fn show_profile(ui: &AppWindow, model: &Model) {
     }) else {
         return;
     };
-    super::performance::show(ui, &profile.settings.sensor, &model.stage_edits);
-    super::lighting::show(ui, &profile.settings);
+    let (sensor, settings) = (profile.settings.sensor, profile.settings);
+    super::performance::show(ui, &sensor, &model.stage_edits);
+    super::lighting::show(ui, &settings);
+    super::buttons::show(ui, model);
 }

@@ -1,0 +1,325 @@
+// The mouse from above and from below, with its buttons to click. Button 8
+// is underneath, next to the sensor.
+import { Palette } from "std-widgets.slint";
+import { Theme } from "../globals/theme.slint";
+import { Outline, Shape } from "mouse-shape.slint";
+
+// A numbered spot to click.
+component Spot inherits Rectangle {
+    in property <int> number;
+    in property <string> name;
+    in property <bool> selected;
+    callback clicked();
+
+    border-width: root.selected ? 2px : 1px;
+    border-color: root.selected ? Palette.accent-background : Theme.mouse-part-border;
+    background: root.selected ? Palette.accent-background
+        : touch.has-hover ? Theme.mouse-part-hover : Theme.mouse-part;
+    accessible-role: button;
+    accessible-label: "Button " + root.number + ": " + root.name;
+    accessible-action-default => {
+        root.clicked();
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    Text {
+        text: root.number;
+        color: root.selected ? Palette.accent-foreground : Palette.foreground;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// A front button: its area lights up; it is clicked anywhere in it.
+component FrontButton {
+    in property <string> commands;
+    in property <int> number;
+    in property <string> name;
+    in property <bool> selected;
+    // The area that takes the clicks, and where the number sits.
+    in property <length> area-x;
+    in property <length> area-width;
+    in property <length> area-height;
+    in property <length> label-x;
+    in property <length> label-y;
+    callback clicked();
+
+    Outline {
+        width: parent.width;
+        height: parent.height;
+        commands: root.commands;
+        fill: root.selected ? Palette.accent-background.transparentize(45%)
+            : touch.has-hover ? Theme.mouse-part-hover.transparentize(55%) : transparent;
+    }
+
+    touch := TouchArea {
+        x: root.area-x;
+        y: 0;
+        width: root.area-width;
+        height: root.area-height;
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    Spot {
+        x: root.label-x - 13px;
+        y: root.label-y - 13px;
+        width: 26px;
+        height: 26px;
+        border-radius: 13px;
+        number: root.number;
+        name: root.name;
+        selected: root.selected;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component MouseDiagram {
+    in property <int> selected;
+    in property <[string]> names;
+    callback select(int);
+
+    // The top view is 200 x 350 (the outline's proportions); the view from
+    // below beside it is half as big.
+    property <float> scale: 200 / Shape.width;
+
+    min-width: 316px;
+    max-width: 316px;
+    min-height: 352px;
+    max-height: 352px;
+
+    // From above.
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: 200px;
+        height: 350px;
+
+        // Shadow; the box itself stays hidden under the shell.
+        Rectangle {
+            x: 20px;
+            y: 30px;
+            width: 160px;
+            height: 300px;
+            border-radius: 80px;
+            background: Theme.mouse-body;
+            drop-shadow-blur: 18px;
+            drop-shadow-offset-y: 8px;
+            drop-shadow-color: #00000059;
+        }
+
+        Outline {
+            width: parent.width;
+            height: parent.height;
+            commands: Shape.top;
+            fill: @linear-gradient(135deg, Theme.mouse-part-hover 0%, Theme.mouse-body 55%, Theme.mouse-line 100%);
+            stroke: Theme.mouse-part-border;
+            stroke-width: 1.5px;
+        }
+
+        Outline {
+            width: parent.width;
+            height: parent.height;
+            commands: Shape.groove;
+            fill: Theme.mouse-line.transparentize(50%);
+        }
+
+        Outline {
+            width: parent.width;
+            height: parent.height;
+            commands: Shape.lines;
+            stroke: Theme.mouse-line;
+            stroke-width: 2px;
+        }
+
+        FrontButton {
+            width: parent.width;
+            height: parent.height;
+            commands: Shape.left-button;
+            number: 1;
+            name: root.names[0];
+            area-x: 0;
+            area-width: Shape.split-x * root.scale * 1px;
+            area-height: Shape.split-y * root.scale * 1px;
+            label-x: 58px;
+            label-y: 92px;
+            selected: root.selected == 1;
+            clicked => {
+                root.select(1);
+            }
+        }
+
+        FrontButton {
+            width: parent.width;
+            height: parent.height;
+            commands: Shape.right-button;
+            number: 2;
+            name: root.names[1];
+            area-x: Shape.split-x * root.scale * 1px;
+            area-width: parent.width - self.area-x;
+            area-height: Shape.split-y * root.scale * 1px;
+            label-x: 154px;
+            label-y: 92px;
+            selected: root.selected == 2;
+            clicked => {
+                root.select(2);
+            }
+        }
+
+        // The wheel: up (4), click (3), down (5).
+        Spot {
+            x: 97px;
+            y: 20px;
+            width: 20px;
+            height: 20px;
+            border-radius: 10px;
+            number: 4;
+            name: root.names[3];
+            selected: root.selected == 4;
+            clicked => {
+                root.select(4);
+            }
+        }
+
+        Spot {
+            x: 92px;
+            y: 44px;
+            width: 30px;
+            height: 56px;
+            border-radius: 10px;
+            number: 3;
+            name: root.names[2];
+            selected: root.selected == 3;
+            clicked => {
+                root.select(3);
+            }
+        }
+
+        Spot {
+            x: 97px;
+            y: 104px;
+            width: 20px;
+            height: 20px;
+            border-radius: 10px;
+            number: 5;
+            name: root.names[4];
+            selected: root.selected == 5;
+            clicked => {
+                root.select(5);
+            }
+        }
+
+        // The side buttons, one long bar on the left side across the end of
+        // the front buttons: front (6) and rear (7).
+        Spot {
+            x: 6px;
+            y: 104px;
+            width: 20px;
+            height: 58px;
+            border-radius: 9px;
+            number: 6;
+            name: root.names[5];
+            selected: root.selected == 6;
+            clicked => {
+                root.select(6);
+            }
+        }
+
+        Spot {
+            x: 6px;
+            y: 166px;
+            width: 20px;
+            height: 56px;
+            border-radius: 9px;
+            number: 7;
+            name: root.names[6];
+            selected: root.selected == 7;
+            clicked => {
+                root.select(7);
+            }
+        }
+    }
+
+    // From below: the profile button next to the sensor.
+    Rectangle {
+        x: 216px;
+        y: 166px;
+        width: 100px;
+        height: 175px;
+
+        Outline {
+            width: parent.width;
+            height: parent.height;
+            commands: Shape.bottom;
+            fill: Theme.mouse-body;
+            stroke: Theme.mouse-part-border;
+            stroke-width: 1px;
+        }
+
+        // Sensor.
+        Rectangle {
+            x: 34px;
+            y: 62px;
+            width: 22px;
+            height: 22px;
+            border-radius: 11px;
+            border-width: 3px;
+            border-color: Theme.mouse-part-border;
+            background: Theme.mouse-line;
+        }
+
+        // The mode switch and the dongle compartment, for orientation.
+        Rectangle {
+            x: 66px;
+            y: 84px;
+            width: 9px;
+            height: 18px;
+            border-radius: 4px;
+            background: Theme.mouse-line;
+        }
+
+        Rectangle {
+            x: 60px;
+            y: 116px;
+            width: 20px;
+            height: 16px;
+            border-radius: 3px;
+            background: Theme.mouse-line;
+        }
+
+        Spot {
+            x: 60px;
+            y: 50px;
+            width: 22px;
+            height: 30px;
+            border-radius: 8px;
+            number: 8;
+            name: root.names[7];
+            selected: root.selected == 8;
+            clicked => {
+                root.select(8);
+            }
+        }
+    }
+
+    Text {
+        x: 216px;
+        y: 142px;
+        width: 100px;
+        text: "Underneath";
+        font-size: 12px;
+        color: Theme.muted;
+        horizontal-alignment: center;
+    }
+}

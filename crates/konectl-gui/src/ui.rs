@@ -1,12 +1,14 @@
 //! Connects the Slint window with the worker. Runs on the UI thread.
 
 pub mod app;
+pub mod buttons;
 pub mod lighting;
 pub mod performance;
 pub mod profiles;
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use konectl::ButtonAction;
 use slint::{ComponentHandle as _, Weak};
 
 use crate::generated::{AppState, AppWindow};
@@ -21,6 +23,12 @@ pub struct Model {
     pub resets: i32,
     /// Edits per DPI stage row (see `StageView.edits`).
     pub stage_edits: [i32; 5],
+    /// The function group chosen on the Buttons page, until another button
+    /// or layer is shown.
+    pub button_group: Option<&'static str>,
+    /// Profile, button, layer (Easy-Shift) and function the Buttons page
+    /// editors were filled for.
+    pub button_shown: Option<(u8, u8, bool, ButtonAction)>,
 }
 
 /// Shared with the event callback, which the worker thread creates; it is

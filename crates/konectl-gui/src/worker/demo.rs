@@ -9,7 +9,10 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use konectl::settings::{PROFILE_COUNT, set_profile_color};
-use konectl::{Backup, ConnectionMode, ProfileBackup, ProfileSettings, RemovedProfile, Rgb};
+use konectl::{
+    Backup, ButtonAction, Buttons, ConnectionMode, Layer, Macro, ProfileBackup, ProfileSettings,
+    RemovedProfile, Rgb,
+};
 
 use super::device::{ConnectError, Connector, Device, Firmwares, Power};
 use crate::access::Outcome;
@@ -354,6 +357,35 @@ impl Device for DemoDevice {
     fn restore(&mut self, backup: &Backup) -> konectl::Result<()> {
         self.answering("restore")?.backup = backup.clone();
         Ok(())
+    }
+
+    fn buttons(&mut self, profile: u8) -> konectl::Result<Buttons> {
+        let mut state = self.answering("button query")?;
+        find(&mut state.backup, profile)?
+            .buttons
+            .ok_or_else(|| konectl::Error::InvalidValue("no buttons in the demo".to_owned()))
+    }
+
+    fn write_buttons(&mut self, buttons: &Buttons) -> konectl::Result<()> {
+        let mut state = self.answering("button write")?;
+        find(&mut state.backup, buttons.profile())?.buttons = Some(*buttons);
+        Ok(())
+    }
+
+    /// The demo keeps no macro keys, like the mouse cannot report them.
+    fn write_macro(
+        &mut self,
+        buttons: &Buttons,
+        button: u8,
+        layer: Layer,
+        _macro: &Macro,
+    ) -> konectl::Result<()> {
+        if !matches!(buttons.action(button, layer)?, ButtonAction::Macro(_)) {
+            return Err(konectl::Error::InvalidValue(format!(
+                "button {button} does not play a macro"
+            )));
+        }
+        self.write_buttons(buttons)
     }
 }
 

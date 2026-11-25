@@ -1,6 +1,6 @@
 //! Messages between the user interface and the worker.
 
-use konectl::{Backup, ConnectionMode, Rgb};
+use konectl::{Backup, ButtonAction, ConnectionMode, Layer, MacroMode, Rgb};
 
 use super::device::{Firmwares, Power};
 use crate::command_line::CommandLines;
@@ -29,6 +29,21 @@ pub enum Request {
     ProfileColour {
         profile: u8,
         colour: Option<Rgb>,
+    },
+    /// Give a button a function (not a macro).
+    SetButton {
+        profile: u8,
+        button: u8,
+        layer: Layer,
+        action: ButtonAction,
+    },
+    /// Give a button a macro, with its keys as typed (`Macro` syntax).
+    SetMacro {
+        profile: u8,
+        button: u8,
+        layer: Layer,
+        keys: String,
+        mode: MacroMode,
     },
     /// Go back to the state before the last change.
     Undo,
