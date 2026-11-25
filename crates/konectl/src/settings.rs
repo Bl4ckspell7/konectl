@@ -558,7 +558,8 @@ pub enum Effect {
     Blinking,
     /// "AIMO intelligent lighting" in the official software.
     Aimo,
-    /// Shows the battery level.
+    /// "Battery indication" in the official software. At full battery the
+    /// mouse breathes in the zone colours, with the official software too.
     Battery,
     /// An effect konectl does not know.
     Other(u8),

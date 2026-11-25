@@ -2,8 +2,12 @@
 //! the command bar. Every line names the profile (`-p N`), so it does the same
 //! whichever profile is active.
 
+use konectl::buttons::BUTTON_COUNT;
 use konectl::settings::{DPI_STAGE_COUNT, profile_color};
-use konectl::{Backup, Effect, LedTimeout, LiftOff, Lighting, ProfileSettings, Rgb, Sensor};
+use konectl::{
+    Backup, ButtonAction, Buttons, Effect, Layer, LedTimeout, LiftOff, Lighting, MacroMode,
+    ProfileSettings, Rgb, Sensor,
+};
 
 /// Command lines for one change.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -162,6 +166,100 @@ fn lighting(before: &Lighting, after: &Lighting, profile: u8) -> Option<String> 
     Some(line)
 }
 
+/// `text` as one shell word.
+fn shell_quote(text: &str) -> String {
+    let plain: bool = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || ":+,._-/=".contains(c));
+    if plain {
+        text.to_owned()
+    } else {
+        format!("'{}'", text.replace('\'', "'\\''"))
+    }
+}
+
+fn layer_flag(layer: Layer) -> &'static str {
+    match layer {
+        Layer::Standard => "",
+        Layer::EasyShift => " -e",
+    }
+}
+
+/// `konectl button`; `None` for functions the CLI cannot set (macros need
+/// their keys, see [`macro_button`]).
+fn button_line(profile: u8, button: u8, layer: Layer, action: ButtonAction) -> Option<String> {
+    match action {
+        ButtonAction::Macro(_)
+        | ButtonAction::Host(_)
+        | ButtonAction::FactoryDefault
+        | ButtonAction::Other { .. } => None,
+        action => Some(format!(
+            "konectl button {button} {}{} -p {profile}",
+            shell_quote(&action.to_string()),
+            layer_flag(layer)
+        )),
+    }
+}
+
+pub fn button(profile: u8, button: u8, layer: Layer, action: ButtonAction) -> CommandLines {
+    let mut commands = CommandLines::new();
+    commands.push(button_line(profile, button, layer, action));
+    commands
+}
+
+/// `konectl button N 'macro:KEYS'` with the keys as typed.
+pub fn macro_button(
+    profile: u8,
+    button: u8,
+    layer: Layer,
+    keys: &str,
+    mode: MacroMode,
+) -> CommandLines {
+    let mode: Option<String> = match mode {
+        MacroMode::OnPress { repeat: 1 } => Some(String::new()),
+        MacroMode::OnPress { repeat } => Some(format!(" --repeat {repeat}")),
+        MacroMode::WhilePressed => Some(" --while-pressed".to_owned()),
+        MacroMode::Toggle => Some(" --toggle".to_owned()),
+        _ => None,
+    };
+    let mut commands = CommandLines::new();
+    commands.push(mode.map(|mode| {
+        format!(
+            "konectl button {button} {}{mode}{} -p {profile}",
+            shell_quote(&format!("macro:{keys}")),
+            layer_flag(layer)
+        )
+    }));
+    commands
+}
+
+/// The lines that turn the assignments `before` into `after`; a macro has no
+/// line, its keys are not known.
+pub fn buttons(before: &Buttons, after: &Buttons) -> CommandLines {
+    let mut commands = CommandLines::new();
+    for layer in [Layer::Standard, Layer::EasyShift] {
+        for number in 1..=BUTTON_COUNT {
+            let (Ok(old), Ok(new)) = (before.action(number, layer), after.action(number, layer))
+            else {
+                continue;
+            };
+            if old != new {
+                // Only what the CLI accepts (not e.g. keys with right-hand
+                // modifiers, which the official software sets).
+                let mut copy: Buttons = *before;
+                let accepted: bool = copy.set_action(number, layer, new).is_ok();
+                commands.push(
+                    accepted
+                        .then(|| button_line(after.profile(), number, layer, new))
+                        .flatten(),
+                );
+            }
+        }
+    }
+    commands
+}
+
 pub fn activate(profile: u8) -> CommandLines {
     one(format!("konectl profile {profile}"))
 }
@@ -209,8 +307,10 @@ pub fn backup(before: &Backup, after: &Backup) -> CommandLines {
                 profile_color(&new.entry),
             ));
         }
-        if old.buttons != new.buttons {
-            commands.complete = false;
+        match (&old.buttons, &new.buttons) {
+            (Some(old), Some(new)) => commands.extend(buttons(old, new)),
+            (None, None) => {}
+            _ => commands.complete = false,
         }
     }
     if before.active_profile != after.active_profile {
@@ -395,6 +495,65 @@ mod tests {
             profile_colour(2, None).lines,
             ["konectl profile color 2 none"]
         );
+    }
+
+    fn demo_buttons() -> Buttons {
+        DemoState::new().backup.profiles[0]
+            .buttons
+            .expect("the demo has buttons")
+    }
+
+    #[test]
+    fn button_commands() {
+        let back: ButtonAction = "back".parse().expect("back");
+        assert_eq!(
+            button(1, 7, Layer::Standard, back).lines,
+            ["konectl button 7 back -p 1"]
+        );
+        let key: ButtonAction = "key:ctrl+c".parse().expect("key");
+        assert_eq!(
+            button(2, 6, Layer::EasyShift, key).lines,
+            ["konectl button 6 key:ctrl+c -e -p 2"]
+        );
+        assert!(!button(1, 7, Layer::Standard, ButtonAction::FactoryDefault).complete);
+
+        let line: Vec<String> = macro_button(
+            1,
+            7,
+            Layer::Standard,
+            "ctrl+c, 50ms, ctrl+v",
+            MacroMode::OnPress { repeat: 3 },
+        )
+        .lines;
+        assert_eq!(
+            line,
+            ["konectl button 7 'macro:ctrl+c, 50ms, ctrl+v' --repeat 3 -p 1"]
+        );
+        let toggle: Vec<String> =
+            macro_button(1, 3, Layer::EasyShift, "a", MacroMode::Toggle).lines;
+        assert_eq!(toggle, ["konectl button 3 macro:a --toggle -e -p 1"]);
+    }
+
+    #[test]
+    fn quotes_what_the_shell_would_split() {
+        assert_eq!(shell_quote("key:ctrl+c"), "key:ctrl+c");
+        assert_eq!(shell_quote("macro:a, b"), "'macro:a, b'");
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn changed_buttons_give_one_line_each() {
+        let before: Buttons = demo_buttons();
+        let mut after: Buttons = before;
+        after
+            .set_action(7, Layer::Standard, "volume-up".parse().expect("named"))
+            .expect("allowed");
+        after
+            .set_action(6, Layer::Standard, ButtonAction::Macro(MacroMode::Toggle))
+            .expect("allowed");
+        let commands: CommandLines = buttons(&before, &after);
+        assert_eq!(commands.lines, ["konectl button 7 volume-up -p 1"]);
+        assert!(!commands.complete);
     }
 
     #[test]

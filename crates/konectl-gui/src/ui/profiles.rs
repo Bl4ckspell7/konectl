@@ -18,7 +18,7 @@ pub fn install(ui: &AppWindow, requests: &Requests, model: &SharedModel) {
     let shared: SharedModel = model.clone();
     state.on_profile_selected(move |_| {
         if let Some(ui) = window.upgrade() {
-            super::app::show_profile(&ui, &lock(&shared));
+            super::app::show_profile(&ui, &mut lock(&shared));
         }
     });
 

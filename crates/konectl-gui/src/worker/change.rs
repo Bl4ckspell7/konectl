@@ -7,10 +7,13 @@
 //! After a failed write the mouse is read again: part of it may have arrived.
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use konectl::buttons::Special;
 use konectl::settings::set_profile_color;
-use konectl::{Backup, ProfileSettings, RemovedProfile, Rgb};
+use konectl::{
+    Backup, ButtonAction, Buttons, Layer, Macro, MacroMode, ProfileSettings, RemovedProfile, Rgb,
+};
 
 use super::device::Device;
 use super::request::{Change, Event, Request};
@@ -48,6 +51,37 @@ pub(super) fn collect_edits(
             }
             Ok(other) => return (edits, Following::Next(other)),
             Err(RecvTimeoutError::Timeout) => return (edits, Following::Nothing),
+        }
+    }
+}
+
+/// How long a button function waits for another one for the same button
+/// (stepping through a list with the arrow keys chooses each function).
+const BUTTON_SETTLE: Duration = Duration::from_millis(400);
+
+/// The last of the button functions chosen in quick succession for the same
+/// button and layer, starting with `first`.
+pub(super) fn latest_button(first: Request, requests: &Receiver<Request>) -> (Request, Following) {
+    let target = |request: &Request| match request {
+        Request::SetButton {
+            profile,
+            button,
+            layer,
+            ..
+        } => Some((*profile, *button, *layer)),
+        _ => None,
+    };
+    let mut latest: Request = first;
+    loop {
+        match requests.recv_timeout(BUTTON_SETTLE) {
+            Ok(next) if target(&next).is_some() && target(&next) == target(&latest) => {
+                latest = next
+            }
+            Ok(Request::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
+                return (latest, Following::End);
+            }
+            Ok(other) => return (latest, Following::Next(other)),
+            Err(RecvTimeoutError::Timeout) => return (latest, Following::Nothing),
         }
     }
 }
@@ -101,6 +135,16 @@ fn set_settings(backup: &mut Backup, settings: ProfileSettings) {
         .find(|profile| profile.settings.profile() == settings.profile())
     {
         profile.settings = settings;
+    }
+}
+
+fn set_buttons(backup: &mut Backup, buttons: Buttons) {
+    if let Some(profile) = backup
+        .profiles
+        .iter_mut()
+        .find(|profile| profile.settings.profile() == buttons.profile())
+    {
+        profile.buttons = Some(buttons);
     }
 }
 
@@ -198,6 +242,154 @@ impl Worker {
             commands.extend(command_line::settings(&current, &after));
         }
         Ok(commands)
+    }
+
+    /// Gives a button a function (not a macro).
+    pub(super) fn set_button(
+        &mut self,
+        profile: u8,
+        button: u8,
+        layer: Layer,
+        action: ButtonAction,
+        now: Instant,
+    ) {
+        if let ButtonAction::Special(Special::Profile(target)) = action
+            && self.snapshot.as_ref().is_some_and(|snapshot| {
+                !snapshot
+                    .backup
+                    .profiles
+                    .iter()
+                    .any(|candidate| candidate.settings.profile() == target)
+            })
+        {
+            self.change_refused(konectl::Error::UnusedProfile(target));
+            return;
+        }
+        let result = self.write_button(profile, |current| {
+            let mut after: Buttons = *current;
+            after.set_action(button, layer, action)?;
+            Ok(after)
+        });
+        match result {
+            Ok(Some(())) => {
+                self.changed(Done::commands(command_line::button(
+                    profile, button, layer, action,
+                )));
+            }
+            Ok(None) => self.changed(Done::commands(CommandLines::new())),
+            Err(Failure::Refused(error)) => self.change_refused(error),
+            Err(Failure::Failed { error, pushed }) => self.change_failed(error, pushed, now),
+        }
+    }
+
+    /// Gives a button a macro; `keys` as typed. The macro is always written:
+    /// what the mouse has cannot be read.
+    pub(super) fn set_macro(
+        &mut self,
+        profile: u8,
+        button: u8,
+        layer: Layer,
+        keys: &str,
+        mode: MacroMode,
+        now: Instant,
+    ) {
+        let macro_: Macro = match keys.parse() {
+            Ok(macro_) => macro_,
+            Err(error) => {
+                self.change_refused(error);
+                return;
+            }
+        };
+        self.send(Event::Busy(Some("Writing the macro …")));
+        let result: Result<(), Failure> = (|| {
+            let unread = |error: konectl::Error| Failure::Failed {
+                error,
+                pushed: false,
+            };
+            let device = self
+                .device
+                .as_mut()
+                .ok_or(konectl::Error::NotFound)
+                .map_err(unread)?;
+            let current: Buttons = device.buttons(profile).map_err(unread)?;
+            let mut after: Buttons = current;
+            after
+                .set_action(button, layer, ButtonAction::Macro(mode))
+                .map_err(Failure::Refused)?;
+            if let Some(snapshot) = self.snapshot.as_mut() {
+                set_buttons(&mut snapshot.backup, current);
+            }
+            // Only the keys change: there is nothing Undo could write back.
+            let undoable: bool = after != current;
+            self.save_state(undoable).map_err(unread)?;
+            let device = self
+                .device
+                .as_mut()
+                .ok_or(konectl::Error::NotFound)
+                .map_err(unread)?;
+            device
+                .write_macro(&after, button, layer, &macro_)
+                .map_err(|error| Failure::Failed {
+                    error,
+                    pushed: undoable,
+                })?;
+            if let Some(snapshot) = self.snapshot.as_mut() {
+                set_buttons(&mut snapshot.backup, after);
+            }
+            Ok(())
+        })();
+        self.send(Event::Busy(None));
+        match result {
+            Ok(()) => self.changed(Done {
+                commands: command_line::macro_button(profile, button, layer, keys, mode),
+                note: Some("Macro written; its old keys cannot be brought back.".to_owned()),
+                select: None,
+            }),
+            Err(Failure::Refused(error)) => self.change_refused(error),
+            Err(Failure::Failed { error, pushed }) => self.change_failed(error, pushed, now),
+        }
+    }
+
+    /// Reads the buttons of `profile`, changes them with `change` and writes
+    /// them if they differ; `Some(())` when written.
+    fn write_button(
+        &mut self,
+        profile: u8,
+        change: impl FnOnce(&Buttons) -> konectl::Result<Buttons>,
+    ) -> Result<Option<()>, Failure> {
+        let unread = |error: konectl::Error| Failure::Failed {
+            error,
+            pushed: false,
+        };
+        let device = self
+            .device
+            .as_mut()
+            .ok_or(konectl::Error::NotFound)
+            .map_err(unread)?;
+        let current: Buttons = device.buttons(profile).map_err(unread)?;
+        let after: Buttons = change(&current).map_err(Failure::Refused)?;
+        if let Some(snapshot) = self.snapshot.as_mut() {
+            set_buttons(&mut snapshot.backup, current);
+        }
+        if after == current {
+            return Ok(None);
+        }
+        self.save_state(true).map_err(unread)?;
+        let device = self
+            .device
+            .as_mut()
+            .ok_or(konectl::Error::NotFound)
+            .map_err(unread)?;
+        device
+            .write_buttons(&after)
+            .map_err(|error| Failure::Failed {
+                error,
+                pushed: true,
+            })?;
+        if let Some(snapshot) = self.snapshot.as_mut() {
+            set_buttons(&mut snapshot.backup, after);
+        }
+        Ok(Some(()))
     }
 
     pub(super) fn activate(&mut self, profile: u8, now: Instant) {
@@ -304,6 +496,13 @@ impl Worker {
                         Step::Colour { profile, colour } => {
                             device.set_profile_color(profile, colour)?;
                             set_colour(&mut snapshot.backup, profile, colour);
+                        }
+                        Step::Buttons { now, before } => {
+                            let fresh: Buttons = device.buttons(before.profile())?;
+                            let target: Buttons =
+                                undo::merge_buttons(&fresh, &now, &before).unwrap_or(before);
+                            device.write_buttons(&target)?;
+                            set_buttons(&mut snapshot.backup, target);
                         }
                         Step::Activate(profile) => {
                             device.set_active_profile(profile)?;
@@ -467,6 +666,23 @@ mod tests {
         assert_eq!(receiver.try_recv(), Ok(Request::Undo));
         drop(sender);
         assert_eq!(skip_repeats(&Request::Reload, &receiver), Following::End);
+    }
+
+    #[test]
+    fn quick_button_choices_write_the_last() {
+        let choose = |action: &str, button: u8| Request::SetButton {
+            profile: 1,
+            button,
+            layer: Layer::Standard,
+            action: action.parse().expect("named"),
+        };
+        let (sender, receiver) = mpsc::channel();
+        sender.send(choose("volume-up", 7)).expect("send");
+        sender.send(choose("volume-down", 7)).expect("send");
+        sender.send(choose("back", 6)).expect("send");
+        let (latest, following) = latest_button(choose("mute", 7), &receiver);
+        assert_eq!(latest, choose("volume-down", 7));
+        assert_eq!(following, Following::Next(choose("back", 6)));
     }
 
     #[test]

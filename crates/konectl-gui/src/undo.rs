@@ -4,8 +4,9 @@
 //! another program) stay. When the profiles themselves differ (after adding or
 //! removing one), the whole state is restored.
 
+use konectl::buttons::BUTTON_COUNT;
 use konectl::settings::profile_color;
-use konectl::{Backup, Effect, Lighting, ProfileSettings, Rgb, Sensor};
+use konectl::{Backup, Buttons, Effect, Layer, Lighting, ProfileSettings, Rgb, Sensor};
 
 /// How many changes can be undone.
 const DEPTH: usize = 20;
@@ -52,13 +53,20 @@ pub enum Step {
         profile: u8,
         colour: Option<Rgb>,
     },
+    /// The functions that differ between `now` and `before` go back to
+    /// `before` (see [`merge_buttons`]); a macro's keys do not, they cannot be
+    /// read.
+    Buttons {
+        now: Buttons,
+        before: Buttons,
+    },
     Activate(u8),
 }
 
 /// What going back from `current` to `previous` needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Plan {
-    /// Profiles were added or removed (or buttons changed): write it all back.
+    /// Profiles were added or removed: write it all back.
     Restore,
     /// Writes in this order (activating last, when everything is in place).
     Steps(Vec<Step>),
@@ -87,8 +95,10 @@ pub fn plan(current: &Backup, previous: &Backup) -> Plan {
     }
     let mut steps: Vec<Step> = Vec::new();
     for (now, before) in current.profiles.iter().zip(&previous.profiles) {
-        if now.buttons != before.buttons {
-            return Plan::Restore;
+        match (now.buttons, before.buttons) {
+            (Some(now), Some(before)) if now != before => steps.push(Step::Buttons { now, before }),
+            (Some(_), Some(_)) | (None, None) => {}
+            _ => return Plan::Restore,
         }
         if now.settings.sensor != before.settings.sensor
             || lighting_differs(&now.settings.lighting, &before.settings.lighting)
@@ -155,6 +165,22 @@ pub fn merge(
         fresh.lighting
     };
     ProfileSettings { sensor, lighting }
+}
+
+/// What the mouse has (`fresh`) with the functions that differ between `now`
+/// and `before` set back to `before`; `None` when one cannot be set that way
+/// (then `before` is written as it is).
+pub fn merge_buttons(fresh: &Buttons, now: &Buttons, before: &Buttons) -> Option<Buttons> {
+    let mut merged: Buttons = *fresh;
+    for layer in [Layer::Standard, Layer::EasyShift] {
+        for button in 1..=BUTTON_COUNT {
+            let old = before.action(button, layer).ok()?;
+            if now.action(button, layer).ok()? != old {
+                merged.set_action(button, layer, old).ok()?;
+            }
+        }
+    }
+    Some(merged)
 }
 
 #[cfg(test)]
@@ -242,6 +268,28 @@ mod tests {
         assert_eq!(merged.sensor.active_stage(), 3);
         assert_eq!(merged.lighting.brightness(), before.lighting.brightness());
         assert_eq!(merged.lighting.speed(), 9);
+    }
+
+    #[test]
+    fn button_undo_keeps_other_buttons_changed_meanwhile() {
+        let before: Buttons = DemoState::new().backup.profiles[0]
+            .buttons
+            .expect("buttons");
+        let named = |name: &str| -> konectl::ButtonAction { name.parse().expect("named") };
+        let mut now: Buttons = before;
+        now.set_action(7, Layer::Standard, named("volume-up"))
+            .expect("allowed");
+        let mut fresh: Buttons = now;
+        fresh
+            .set_action(6, Layer::Standard, named("back"))
+            .expect("allowed");
+
+        let merged: Buttons = merge_buttons(&fresh, &now, &before).expect("merged");
+        assert_eq!(
+            merged.action(7, Layer::Standard).ok(),
+            before.action(7, Layer::Standard).ok()
+        );
+        assert_eq!(merged.action(6, Layer::Standard).ok(), Some(named("back")));
     }
 
     #[test]

@@ -8,6 +8,7 @@ mod access;
 mod backend;
 mod command_line;
 mod edit;
+mod functions;
 #[cfg(feature = "screenshots")]
 mod screenshots;
 mod ui;

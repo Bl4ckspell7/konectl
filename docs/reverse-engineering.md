@@ -185,6 +185,7 @@ and applied with *Apply* (Swarm rewrites all profiles on every *Apply*):
 | 76    | button 3 back to universal scrolling         | the record stays, only block 2 changes |
 | 77–78 | macros on buttons 2 and 6 and on Easy-Shift 3 and 6 | macro numbers 2, 5, 9 and 11; right click must stay on a button |
 | 79–82 | system sleep, shut down and wake on buttons 3, 6 and 7, pressed with Swarm closed (all USB traffic) | the mouse sends HID system control itself |
+| 83    | battery indication, then a minute with Swarm open | no live colours: the mouse breathes in the zone colours by itself |
 
 Closing Swarm's window only hides it in the tray, so it reads nothing when it
 is opened again; quit it from the tray icon instead.

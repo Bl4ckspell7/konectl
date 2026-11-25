@@ -9,8 +9,8 @@ use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
 
 use konectl::{
-    Backup, ConnectionMode, Firmware, HidTransport, KoneProAir, Manager, ProfileSettings,
-    RemovedProfile, Rgb, Sensor,
+    Backup, Buttons, ConnectionMode, Firmware, HidTransport, KoneProAir, Layer, Macro, Manager,
+    ProfileSettings, RemovedProfile, Rgb, Sensor,
 };
 
 use crate::access::{self, Outcome};
@@ -70,6 +70,17 @@ pub trait Device {
     fn set_profile_color(&mut self, profile: u8, colour: Option<Rgb>) -> konectl::Result<()>;
     /// Writes a whole state back (profiles, settings, buttons, active profile).
     fn restore(&mut self, backup: &Backup) -> konectl::Result<()>;
+    /// The button assignments of `profile`, read from the mouse.
+    fn buttons(&mut self, profile: u8) -> konectl::Result<Buttons>;
+    fn write_buttons(&mut self, buttons: &Buttons) -> konectl::Result<()>;
+    /// Writes `buttons` and the macro that `button` plays in `layer`.
+    fn write_macro(
+        &mut self,
+        buttons: &Buttons,
+        button: u8,
+        layer: Layer,
+        macro_: &Macro,
+    ) -> konectl::Result<()>;
 }
 
 /// Why no mouse could be opened.
@@ -176,6 +187,24 @@ impl Device for KoneProAir<HidTransport> {
 
     fn restore(&mut self, backup: &Backup) -> konectl::Result<()> {
         KoneProAir::restore(self, backup)
+    }
+
+    fn buttons(&mut self, profile: u8) -> konectl::Result<Buttons> {
+        KoneProAir::buttons(self, Some(profile))
+    }
+
+    fn write_buttons(&mut self, buttons: &Buttons) -> konectl::Result<()> {
+        KoneProAir::write_buttons(self, buttons)
+    }
+
+    fn write_macro(
+        &mut self,
+        buttons: &Buttons,
+        button: u8,
+        layer: Layer,
+        macro_: &Macro,
+    ) -> konectl::Result<()> {
+        KoneProAir::write_macro(self, buttons, button, layer, macro_)
     }
 }
 

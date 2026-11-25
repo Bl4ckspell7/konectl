@@ -1,0 +1,49 @@
+// The Buttons page, set from Rust (`src/ui/buttons.rs`).
+
+// A button in the list beside the diagram.
+export struct ButtonView {
+    number: int,
+    name: string,
+    function: string,
+}
+
+export global ButtonPage {
+    // The layer shown: standard, or while Easy-Shift is held.
+    in-out property <bool> easy-shift;
+    // The selected button, 1–8.
+    in-out property <int> button: 7;
+    in property <[ButtonView]> buttons;
+    in property <string> title;
+    in property <string> current;
+    // Why the button takes no function here, if so.
+    in property <string> note;
+
+    // The groups of functions the selected button takes, and the chosen one.
+    in property <[string]> groups;
+    in-out property <int> group;
+    // How the chosen group is filled in: "list", "key", "easy-aim", "macro".
+    in property <string> kind;
+    in property <[string]> functions;
+    in-out property <int> function;
+
+    in-out property <string> key;
+    in property <string> key-problem;
+    in-out property <int> easy-aim-dpi: 400;
+    in-out property <string> macro-keys;
+    in property <string> macro-problem;
+    out property <[string]> macro-modes: ["Once per press", "Several times per press", "While held", "On and off"];
+    in-out property <int> macro-mode;
+    in-out property <int> macro-repeat: 2;
+    // Other profiles that play the macro of this button too.
+    in property <string> macro-shared;
+
+    callback select(int);
+    callback show-layer(bool);
+    callback choose-group(int);
+    callback choose-function(int);
+    callback check-key(string);
+    callback set-key(string);
+    callback set-easy-aim(int);
+    callback check-macro(string);
+    callback write-macro();
+}

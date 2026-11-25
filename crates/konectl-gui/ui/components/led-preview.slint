@@ -1,16 +1,47 @@
-// The mouse seen from above with its two light zones in the left and right
-// buttons, showing the lighting roughly as the mouse does. Drawn here, no
-// product images.
+// The mouse seen from above with its two light zones in the front of the left
+// and right button, showing the lighting roughly as the mouse does.
 import { Palette } from "std-widgets.slint";
+import { Theme } from "../globals/theme.slint";
+import { Outline, Shape } from "mouse-shape.slint";
 
-component Zone inherits Rectangle {
+// The light of a button fades out towards the back. The software renderer
+// draws gradients in paths as one colour, so the fade is drawn as layers:
+// each covers the lit part from the front down to its own end, and together
+// they add up to less and less light towards the back.
+global Fade {
+    out property <int> layers: 12;
+    out property <float> step: (Shape.light-end - Shape.light-full) / (self.layers - 1);
+
+    // Light (alpha) wanted where layers `index` and later overlap, for full
+    // light `full`.
+    public pure function wanted(index: int, full: float) -> float {
+        return index >= self.layers ? 0 : full * (1 - index / self.layers);
+    }
+
+    // The bottom of layer `index`, in drawing units.
+    pure function bottom(index: int) -> float {
+        return Shape.light-full + index * self.step;
+    }
+
+    // Layer `index` of the left or right button. Below the fully lit part the
+    // outline is nearly straight, so its edge continues as a line.
+    public pure function layer(index: int, left: bool) -> string {
+        return (left ? Shape.left-light : Shape.right-light)
+            + " L " + (left ? 47 - (self.bottom(index) - Shape.light-full) / 5 : 357 + (self.bottom(index) - Shape.light-full) / 10)
+            + " " + self.bottom(index)
+            + " L " + Shape.split-x + " " + self.bottom(index) + " Z";
+    }
+}
+
+// One layer of a button's light.
+component Zone inherits Outline {
     in property <color> shown;
     in property <float> level;
+    in property <int> index;
+    property <float> full: max(root.level, 0.04);
 
-    border-radius: 6px;
-    background: root.shown.with-alpha(max(root.level, 0.04));
-    drop-shadow-blur: 14px * root.level;
-    drop-shadow-color: root.shown.with-alpha(root.level * 0.9);
+    // So that this layer and the later ones together give the wanted light.
+    fill: root.shown.with-alpha(1 - (1 - Fade.wanted(root.index, root.full)) / (1 - Fade.wanted(root.index + 1, root.full)));
 }
 
 export component LedPreview {
@@ -23,35 +54,36 @@ export component LedPreview {
     in property <float> speed;
     in property <float> left-intensity;
     in property <float> right-intensity;
-    // 0–1, for the battery effect.
-    in property <float> battery: 0.8;
     // Animates only while shown.
     in property <bool> running;
 
-    property <bool> animated: root.running && root.effect >= 2 && root.effect <= 6;
+    property <bool> animated: root.running && root.effect >= 2;
     property <float> seconds: root.animated ? animation-tick() / 1ms / 1000 : 0;
     // Seconds per cycle, measured on the mouse with breathing (off, full,
     // off): about 7 s at speed 1 and 2.8 s at speed 11. The other effects use
     // the same cycle.
     property <float> period: 7 - (root.speed - 1) * 0.42;
     property <float> phase: root.seconds / root.period - floor(root.seconds / root.period);
+    // Battery: at full battery the mouse breathes in its colours, with the
+    // official software too.
     property <float> pulse: root.effect == 0 ? 0
-        : root.effect == 2 ? (1 - cos(root.phase * 360deg)) / 2
+        : root.effect == 2 || root.effect == 7 ? (1 - cos(root.phase * 360deg)) / 2
         : root.effect == 3 ? ((root.phase < 0.12 || (root.phase > 0.24 && root.phase < 0.36)) ? 1 : 0.1)
         : root.effect == 5 ? (root.phase < 0.5 ? 1 : 0)
         : 1;
     property <float> level: root.brightness / 100 * root.pulse;
-    property <float> slow-hue: root.seconds * 40 - floor(root.seconds * 40 / 360) * 360;
+    // Wave: one round of colours takes three cycles; AIMO changes slowly.
+    property <float> wave-hue: root.seconds / (3 * root.period) * 360;
+    property <float> slow-hue: root.seconds * 12 - floor(root.seconds * 12 / 360) * 360;
+    // Drawing units to pixels.
+    property <length> unit: 132px / Shape.width;
 
     function shown(base: color, offset: float) -> color {
         if root.effect == 4 {
-            return hsv(root.phase * 360 + offset, 1, 1);
+            return hsv(root.wave-hue + offset - floor((root.wave-hue + offset) / 360) * 360, 1, 1);
         }
         if root.effect == 6 {
             return hsv(root.slow-hue + offset, 0.8, 1);
-        }
-        if root.effect == 7 {
-            return hsv(root.battery * 120, 1, 1);
         }
         return base;
     }
@@ -61,59 +93,71 @@ export component LedPreview {
     accessible-role: image;
     accessible-label: "Preview of the lighting";
 
-    body := Rectangle {
+    Rectangle {
         x: (parent.width - self.width) / 2;
         y: (parent.height - self.height) / 2;
-        width: 140px;
-        height: 220px;
-        border-radius: 64px;
-        background: #26282c;
-        border-width: 2px;
-        border-color: Palette.border;
+        width: Shape.width * root.unit;
+        height: Shape.height * root.unit;
 
-        // The light zones, in the left and right button.
-        Zone {
-            x: 24px;
-            y: 22px;
-            width: 30px;
-            height: 74px;
+        Outline {
+            width: parent.width;
+            height: parent.height;
+            commands: Shape.top;
+            fill: Theme.mouse-body;
+        }
+
+        // The light zones: the front of the left and right button.
+        for index in Fade.layers: Zone {
+            width: parent.width;
+            height: parent.height;
+            commands: Fade.layer(index, true);
+            index: index;
             shown: root.shown(root.left, 0);
             level: root.level * root.left-intensity / 100;
         }
 
-        Zone {
-            x: parent.width - 54px;
-            y: 22px;
-            width: 30px;
-            height: 74px;
+        for index in Fade.layers: Zone {
+            width: parent.width;
+            height: parent.height;
+            commands: Fade.layer(index, false);
+            index: index;
             shown: root.shown(root.right, 60);
             level: root.level * root.right-intensity / 100;
         }
 
-        // Where the buttons end, the gap between them, and the wheel.
-        Rectangle {
-            x: 10px;
-            y: 104px;
-            width: parent.width - 20px;
-            height: 2px;
-            background: #3a3d42;
+        Outline {
+            width: parent.width;
+            height: parent.height;
+            commands: Shape.groove;
+            fill: Theme.mouse-line.transparentize(50%);
         }
 
-        Rectangle {
-            x: parent.width / 2 - 1px;
-            y: 2px;
-            width: 2px;
-            height: 104px;
-            background: #3a3d42;
+        Outline {
+            width: parent.width;
+            height: parent.height;
+            commands: Shape.lines;
+            stroke: Theme.mouse-line;
+            stroke-width: 2px;
         }
 
+        Outline {
+            width: parent.width;
+            height: parent.height;
+            commands: Shape.top;
+            stroke: Theme.mouse-part-border;
+            stroke-width: 1.5px;
+        }
+
+        // The wheel.
         Rectangle {
-            x: parent.width / 2 - 7px;
-            y: 26px;
-            width: 14px;
-            height: 30px;
-            border-radius: 7px;
-            background: #44474d;
+            x: (Shape.split-x - 26) * root.unit;
+            y: 84 * root.unit;
+            width: 52 * root.unit;
+            height: 102 * root.unit;
+            border-radius: 5px;
+            background: Theme.mouse-part;
+            border-width: 1px;
+            border-color: Theme.mouse-part-border;
         }
     }
 }

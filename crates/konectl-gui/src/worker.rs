@@ -21,7 +21,7 @@ use konectl::{ConnectionMode, Sensor};
 use crate::access::Outcome;
 use crate::command_line::CommandLines;
 use crate::undo::UndoStack;
-use change::{Following, collect_edits, skip_repeats};
+use change::{Following, collect_edits, latest_button, skip_repeats};
 use device::{ConnectError, Connector, Device};
 pub use request::{Change, Event, Request, Snapshot, Status};
 use schedule::{Phase, Schedule, Task};
@@ -106,6 +106,11 @@ impl Worker {
                     self.apply_edits(&edits, Instant::now());
                     following
                 }
+                Ok(request @ Request::SetButton { .. }) => {
+                    let (latest, following) = latest_button(request, requests);
+                    self.handle(latest, Instant::now());
+                    following
+                }
                 Ok(request) => {
                     self.handle(request.clone(), Instant::now());
                     skip_repeats(&request, requests)
@@ -162,6 +167,19 @@ impl Worker {
             Request::AddProfile { copy_from } => self.add_profile(copy_from, now),
             Request::RemoveProfile(profile) => self.remove_profile(profile, now),
             Request::ProfileColour { profile, colour } => self.colour(profile, colour, now),
+            Request::SetButton {
+                profile,
+                button,
+                layer,
+                action,
+            } => self.set_button(profile, button, layer, action, now),
+            Request::SetMacro {
+                profile,
+                button,
+                layer,
+                keys,
+                mode,
+            } => self.set_macro(profile, button, layer, &keys, mode, now),
             Request::Undo => self.undo(now),
             Request::Shutdown => {}
         }
@@ -992,8 +1010,8 @@ mod tests {
         );
     }
 
-    /// Writes and undoes a DPI change, a lighting change and a profile
-    /// switch; the mouse ends as it started. `cargo test -p konectl-gui --
+    /// Writes and undoes a DPI change, a lighting change, a button and a
+    /// profile switch; the mouse ends as it started. `cargo test -p konectl-gui --
     /// --ignored --test-threads=1` with the mouse connected and awake.
     #[test]
     #[ignore = "needs a connected mouse; writes to it"]
@@ -1057,6 +1075,25 @@ mod tests {
                 edit: Edit::Speed(speed),
             },
         ];
+        // A button: a media key other than the one it has (no macro: the
+        // keys of one on the mouse could not be restored).
+        let button_7 = original
+            .profiles
+            .iter()
+            .find(|candidate| candidate.settings.profile() == profile)
+            .and_then(|candidate| candidate.buttons)
+            .and_then(|buttons| buttons.action(7, konectl::Layer::Standard).ok());
+        let volume_up: konectl::ButtonAction = "volume-up".parse().expect("named");
+        requests.push(Request::SetButton {
+            profile,
+            button: 7,
+            layer: konectl::Layer::Standard,
+            action: if button_7 == Some(volume_up) {
+                "volume-down".parse().expect("named")
+            } else {
+                volume_up
+            },
+        });
         requests.extend(other.map(Request::ActivateProfile));
         let count: usize = requests.len();
         for request in requests {

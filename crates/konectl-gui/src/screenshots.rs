@@ -19,7 +19,8 @@ use crate::ui::{self, Model};
 use crate::worker::demo::{self, DemoConnector, DemoState};
 use crate::worker::{Event, Request, Worker};
 
-const WIDTH: u32 = 980;
+/// The window's preferred size.
+const WIDTH: u32 = 1024;
 const HEIGHT: u32 = 660;
 const SCALE: f32 = 1.5;
 
@@ -72,6 +73,12 @@ pub fn run(directory: &Path) -> Result<(), String> {
         state.set_page(i32::try_from(page).unwrap_or_default());
         shot(name)?;
     }
+    ui.set_color_scheme(slint::language::ColorScheme::Dark);
+    for (page, name) in ["lighting", "buttons"].into_iter().enumerate() {
+        state.set_page(i32::try_from(page + 1).unwrap_or_default());
+        shot(&format!("dark-{name}"))?;
+    }
+    ui.set_color_scheme(slint::language::ColorScheme::Light);
 
     state.set_page(0);
     worker.handle(

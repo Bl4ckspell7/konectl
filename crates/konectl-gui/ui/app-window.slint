@@ -3,6 +3,7 @@ import { Button, Palette, ScrollView } from "std-widgets.slint";
 import { AppState, MouseState, DeviceView, ParsedColor, ProfileView } from "globals/app-state.slint";
 import { Lighting } from "globals/lighting.slint";
 import { Performance, StageView } from "globals/performance.slint";
+import { ButtonPage, ButtonView } from "globals/buttons.slint";
 import { Theme } from "globals/theme.slint";
 import { Sidebar } from "components/widgets/sidebar.slint";
 import { Banner, BannerKind } from "components/widgets/banner.slint";
@@ -13,10 +14,10 @@ import { AccessPage } from "pages/access.slint";
 import { DevicePage } from "pages/device.slint";
 import { LightingPage } from "pages/lighting.slint";
 import { PerformancePage } from "pages/performance.slint";
-import { PlaceholderPage } from "pages/placeholder.slint";
+import { ButtonsPage } from "pages/buttons.slint";
 import { StatePage } from "pages/state.slint";
 
-export { AppState, MouseState, DeviceView, ParsedColor, ProfileView, Lighting, Performance, StageView }
+export { AppState, MouseState, DeviceView, ParsedColor, ProfileView, Lighting, Performance, StageView, ButtonPage, ButtonView }
 
 export component AppWindow inherits Window {
     property <[string]> pages: ["Performance", "Lighting", "Buttons", "Device"];
@@ -25,12 +26,16 @@ export component AppWindow inherits Window {
     property <bool> idle: root.connected && !AppState.busy;
     // The page has a profile to choose (not the Device page).
     property <bool> per-profile: AppState.page < 3;
+    property <bool> has-banner: (AppState.has-snapshot && AppState.state == MouseState.asleep)
+        || AppState.changed-elsewhere || AppState.error != "";
 
     title: AppState.demo ? "konectl (demo)" : "konectl";
     // The minimum size comes from the content, so nothing is cut off; pages
     // scroll when the window is lower than them.
-    preferred-width: 1100px;
-    preferred-height: 760px;
+    preferred-width: 1024px;
+    preferred-height: 660px;
+    // The light or dark scheme (for the screenshot tool; normally the desktop's).
+    in-out property <ColorScheme> color-scheme <=> Palette.color-scheme;
     // The minimum size the content needs (for the screenshot tool).
     out property <length> layout-min-width: self.min-width;
     out property <length> layout-min-height: self.min-height;
@@ -52,51 +57,83 @@ export component AppWindow inherits Window {
         VerticalLayout {
             horizontal-stretch: 1;
 
-            HorizontalLayout {
-                padding: Theme.padding;
-                padding-bottom: Theme.spacing;
-                spacing: Theme.spacing;
+            // Title, Undo and Reload, and the profile to edit: a band of its
+            // own above the page.
+            Rectangle {
                 visible: AppState.has-snapshot;
+                background: Theme.sidebar;
 
-                Text {
-                    text: root.pages[AppState.page];
-                    font-size: 22px;
-                    font-weight: 600;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                }
+                VerticalLayout {
+                    padding-left: Theme.padding;
+                    padding-right: Theme.padding;
+                    padding-top: 12px;
+                    padding-bottom: 12px;
+                    spacing: Theme.spacing;
 
-                Button {
-                    text: "Undo";
-                    enabled: root.idle && AppState.can-undo;
-                    clicked => {
-                        AppState.undo();
+                    HorizontalLayout {
+                        spacing: Theme.spacing;
+
+                        Text {
+                            text: root.pages[AppState.page];
+                            font-size: 22px;
+                            font-weight: 600;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+
+                        Button {
+                            text: "Undo";
+                            enabled: root.idle && AppState.can-undo;
+                            clicked => {
+                                AppState.undo();
+                            }
+                        }
+
+                        Button {
+                            text: "Reload";
+                            enabled: root.connected && !AppState.busy;
+                            clicked => {
+                                AppState.reload();
+                            }
+                        }
+                    }
+
+                    // The profile to edit, or (Device page) a note in its place;
+                    // the band keeps its height on every page.
+                    Rectangle {
+                        min-width: profile-bar.min-width;
+                        min-height: profile-bar.min-height;
+                        preferred-height: profile-bar.preferred-height;
+
+                        profile-bar := ProfileBar {
+                            width: parent.width;
+                            height: parent.height;
+                            visible: root.per-profile;
+                            selected: AppState.selected-profile;
+                        }
+
+                        Text {
+                            width: parent.width;
+                            height: parent.height;
+                            visible: !root.per-profile;
+                            text: "These settings apply to the whole mouse, not to one profile.";
+                            color: Theme.muted;
+                            vertical-alignment: center;
+                        }
                     }
                 }
 
-                Button {
-                    text: "Reload";
-                    enabled: root.connected && !AppState.busy;
-                    clicked => {
-                        AppState.reload();
-                    }
-                }
-            }
-
-            HorizontalLayout {
-                padding-left: Theme.padding;
-                padding-right: Theme.padding;
-                padding-bottom: Theme.spacing;
-                visible: AppState.has-snapshot && root.per-profile;
-
-                ProfileBar {
-                    selected: AppState.selected-profile;
+                Rectangle {
+                    y: parent.height - 1px;
+                    height: 1px;
+                    background: Palette.border;
                 }
             }
 
             VerticalLayout {
                 padding-left: Theme.padding;
                 padding-right: Theme.padding;
+                padding-top: root.has-banner ? Theme.padding : 0;
                 spacing: Theme.spacing;
 
                 if AppState.has-snapshot && AppState.state == MouseState.asleep: Banner {
@@ -137,11 +174,11 @@ export component AppWindow inherits Window {
                     height: parent.height;
                     visible: AppState.has-snapshot && AppState.page == 0;
                     content-width: self.visible-width;
-                    content-height: performance.preferred-height + Theme.spacing + Theme.padding;
+                    content-height: performance.preferred-height + 2 * Theme.padding;
 
                     performance := PerformancePage {
                         x: Theme.padding;
-                        y: Theme.spacing;
+                        y: Theme.padding;
                         width: parent.width - 2 * Theme.padding;
                         height: self.preferred-height;
                         idle: root.idle;
@@ -153,11 +190,11 @@ export component AppWindow inherits Window {
                     height: parent.height;
                     visible: AppState.has-snapshot && AppState.page == 1;
                     content-width: self.visible-width;
-                    content-height: lighting.preferred-height + Theme.spacing + Theme.padding;
+                    content-height: lighting.preferred-height + 2 * Theme.padding;
 
                     lighting := LightingPage {
                         x: Theme.padding;
-                        y: Theme.spacing;
+                        y: Theme.padding;
                         width: parent.width - 2 * Theme.padding;
                         height: self.preferred-height;
                         idle: root.idle;
@@ -170,14 +207,14 @@ export component AppWindow inherits Window {
                     height: parent.height;
                     visible: AppState.has-snapshot && AppState.page == 2;
                     content-width: self.visible-width;
-                    content-height: buttons.preferred-height + Theme.spacing + Theme.padding;
+                    content-height: buttons.preferred-height + 2 * Theme.padding;
 
-                    buttons := PlaceholderPage {
+                    buttons := ButtonsPage {
                         x: Theme.padding;
-                        y: Theme.spacing;
+                        y: Theme.padding;
                         width: parent.width - 2 * Theme.padding;
                         height: self.preferred-height;
-                        title: "Buttons";
+                        idle: root.idle;
                     }
                 }
 
@@ -186,11 +223,11 @@ export component AppWindow inherits Window {
                     height: parent.height;
                     visible: AppState.has-snapshot && AppState.page == 3;
                     content-width: self.visible-width;
-                    content-height: device.preferred-height + Theme.spacing + Theme.padding;
+                    content-height: device.preferred-height + 2 * Theme.padding;
 
                     device := DevicePage {
                         x: Theme.padding;
-                        y: Theme.spacing;
+                        y: Theme.padding;
                         width: parent.width - 2 * Theme.padding;
                         height: self.preferred-height;
                     }
