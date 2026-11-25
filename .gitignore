@@ -9,3 +9,5 @@
 /*.flatpak
 # Release tarballs (scripts/release/tarball.sh).
 /dist/
+# Editor settings.
+/.vscode/
